@@ -1,0 +1,40 @@
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: mini-perplexity-searxng
+    ports:
+      - "8080:8080"
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+      - SEARXNG_SECRET_KEY=mini-perplexity-secret-key-random-value
+      - SEARXNG_SETTINGS_PATH=/etc/searxng/settings.yml
+      - SEARXNG_BIND_ADDRESS=0.0.0.0:8080
+      - INSTANCE_NAME=mini-perplexity-searx
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    restart: unless-stopped
+
+  redis:
+    image: redis:alpine
+    container_name: mini-perplexity-redis
+    command: redis-server --save "" --appendonly "no"
+    restart: unless-stopped
+    tmpfs:
+      - /var/lib/redis
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+
+  mini-perplexity:
+    build: .
+    container_name: mini-perplexity-app
+    ports:
+      - "8000:8000"
+    depends_on:
+      - searxng
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+    restart: unless-stopped

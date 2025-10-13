@@ -1,0 +1,65 @@
+# SearXNG settings
+use_default_settings: true
+
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "mini-perplexity-secret-key-20251013"  # Fixed random secret key
+  base_url: false
+  image_proxy: false
+
+ui:
+  static_use_hash: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: ""
+  formats:
+    - html
+    - json
+
+enabled_plugins:
+  - 'Hash plugin'
+  - 'Search on category select'
+  - 'Tracker URL remover'
+  - 'Open Access DOI rewrite'
+
+engines:
+  - name: google
+    engine: google
+    shortcut: go
+    use_mobile_ui: false
+
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+
+  - name: bing
+    engine: bing
+    shortcut: bi
+
+  - name: arxiv
+    engine: arxiv
+    shortcut: arx
+    categories: science
+
+  - name: google scholar
+    engine: google_scholar
+    shortcut: gs
+    categories: science
+
+  - name: semantic scholar
+    engine: semantic_scholar
+    shortcut: se
+    categories: science
+
+  - name: pubmed
+    engine: pubmed
+    shortcut: pub
+    categories: science
+
+  - name: crossref
+    engine: crossref
+    shortcut: cr
+    categories: science
