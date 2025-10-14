@@ -8,9 +8,9 @@ from typing import Dict, List
 from uuid import uuid4
 
 from ollama_client import generate_clarifying_questions, generate_next_question
-from searx_client import search
-from searx_client import search_from_query_file
+from searx_client import search, search_from_query_file, crawl_urls, search_and_crawl
 
+MODEL = "gpt-oss:20b"
 
 def _input_with_default(prompt: str, default: str) -> str:
     raw = input(prompt).strip()
@@ -37,8 +37,7 @@ def _input_int(prompt: str, default: int, min_v: int | None = None, max_v: int |
 
 def main() -> None:
     print("Using model: ", end="")
-    model_default = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
-    print(model_default)
+    print(MODEL)
 
     print("What would you like to research? ", end="")
     original_question = input().strip()
@@ -107,7 +106,7 @@ def main() -> None:
         "updated_at": now.isoformat(),
         "status": "ready" if questions_asked and all(answers.get(q, "").strip() for q in questions_asked) else "awaiting_answers",
         "plan": {
-            "model": model_default,
+            "model": MODEL,
             "breadth": breadth,
             "depth": depth,
             "output": report_kind,
@@ -133,18 +132,39 @@ def main() -> None:
         from io import StringIO
         
         original_stdout = sys.stdout
-        sys.stdout = StringIO()
-        
-        # Perform the search
-        urls = search(original_question, searx_url, max_results)
-        
-        # Restore stdout
         sys.stdout = original_stdout
+        
+        # Perform the search and crawl the results
+        output_file = f"crawled_content_{qid}.txt"
+        urls, crawled_content = search_and_crawl(
+            original_question, 
+            searx_url, 
+            max_results,
+            output_file=output_file,
+            verbose=True
+        )
         
         if urls:
             print(f"Found {len(urls)} relevant sources:")
             for i, url in enumerate(urls, 1):
-                print(f"{i}. {url}")
+                content_status = "✓ Content extracted" if url in crawled_content else "✗ No content extracted"
+                print(f"{i}. {url} - {content_status}")
+                
+            # Update the query file with crawled content information
+            if crawled_content:
+                payload["crawled_content"] = {
+                    "file": output_file,
+                    "count": len(crawled_content),
+                    "urls": list(crawled_content.keys())
+                }
+                
+                # Save updated query file
+                with out_path.open("w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                
+                print(f"\nContent extracted and saved to {output_file}")
+            else:
+                print("\nNo content was extracted from the sources.")
         else:
             print("No relevant sources found. Make sure SearXNG is running (docker compose up -d searxng redis).")
     except Exception as e:

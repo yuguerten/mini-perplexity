@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import requests
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import json
 import os
 from bs4 import BeautifulSoup
+
+# Import required for crawl4ai
+try:
+    import nest_asyncio
+    from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+    from crawl4ai.content_filter_strategy import PruningContentFilter
+    from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+    
+    # Apply nest_asyncio to allow nested event loops
+    nest_asyncio.apply()
+    CRAWL4AI_AVAILABLE = True
+except ImportError:
+    CRAWL4AI_AVAILABLE = False
 
 
 def search(query: str, searx_url: str = None, num_results: int = 10) -> List[str]:
@@ -165,3 +179,143 @@ def get_latest_query_file() -> Optional[str]:
         return os.path.join(queries_dir, latest_file)
     except Exception:
         return None
+
+
+async def crawl_url(url: str, verbose: bool = False) -> Optional[str]:
+    """
+    Fetch content from a URL using crawl4ai.
+    
+    Args:
+        url: URL to crawl
+        verbose: Whether to enable verbose output
+    
+    Returns:
+        Markdown content as a string, or None if failed
+    """
+    if not CRAWL4AI_AVAILABLE:
+        print("crawl4ai package not available. Install it with: uv pip install -U crawl4ai nest_asyncio")
+        return None
+    
+    try:
+        if verbose:
+            print(f"Crawling: {url}")
+        
+        async with AsyncWebCrawler(verbose=verbose) as crawler:
+            config = CrawlerRunConfig(
+                cache_mode=CacheMode.ENABLED,
+                excluded_tags=['nav', 'footer', 'aside'],
+                remove_overlay_elements=True,
+                markdown_generator=DefaultMarkdownGenerator(
+                    content_filter=PruningContentFilter(
+                        threshold=0.48, 
+                        threshold_type="fixed", 
+                        min_word_threshold=0
+                    ),
+                    options={
+                        "ignore_links": True
+                    }
+                ),
+            )
+            
+            result = await crawler.arun(
+                url=url,
+                config=config,
+            )
+            
+            return result.markdown.raw_markdown
+    except Exception as e:
+        if verbose:
+            print(f"Error crawling {url}: {e}")
+        return None
+
+
+async def crawl_multiple_urls(urls: List[str], verbose: bool = False) -> Dict[str, str]:
+    """
+    Crawl multiple URLs in parallel and return their content.
+    
+    Args:
+        urls: List of URLs to crawl
+        verbose: Whether to enable verbose output
+        
+    Returns:
+        Dictionary mapping URLs to their content
+    """
+    if not CRAWL4AI_AVAILABLE:
+        print("crawl4ai package not available. Install it with: uv pip install -U crawl4ai nest_asyncio")
+        return {}
+    
+    if not urls:
+        return {}
+    
+    print(f"Crawling {len(urls)} URLs...")
+    
+    # Process each URL in parallel
+    tasks = [crawl_url(url, verbose) for url in urls]
+    results = await asyncio.gather(*tasks)
+    
+    # Create a dictionary of URL -> content
+    return {url: content for url, content in zip(urls, results) if content is not None}
+
+
+def crawl_urls(urls: List[str], output_file: Optional[str] = None, verbose: bool = False) -> Dict[str, str]:
+    """
+    Crawl a list of URLs and save their content to a file if specified.
+    
+    Args:
+        urls: List of URLs to crawl
+        output_file: File path to save the results, or None to skip saving
+        verbose: Whether to enable verbose output
+    
+    Returns:
+        Dictionary mapping URLs to their content
+    """
+    if not CRAWL4AI_AVAILABLE:
+        print("crawl4ai package not available. Install it with: uv pip install -U crawl4ai nest_asyncio")
+        return {}
+    
+    # Run the crawler
+    crawled_content = asyncio.run(crawl_multiple_urls(urls, verbose))
+    
+    # Report results
+    success_count = len(crawled_content)
+    print(f"\nCrawling complete: {success_count}/{len(urls)} URLs successfully crawled")
+    
+    # Write results to file if specified
+    if output_file and crawled_content:
+        with open(output_file, "w", encoding="utf-8") as f:
+            for url, content in crawled_content.items():
+                f.write(f"{url}\n")
+                f.write("="*50 + "\n")
+                f.write(content)
+                f.write("\n" + "="*50 + "\n\n")
+        
+        print(f"Results saved to: {output_file}")
+    
+    return crawled_content
+
+
+def search_and_crawl(query: str, searx_url: str = None, num_results: int = 10, 
+                     output_file: Optional[str] = None, verbose: bool = False) -> Tuple[List[str], Dict[str, str]]:
+    """
+    Search using SearXNG and then crawl the resulting URLs.
+    
+    Args:
+        query: The search query
+        searx_url: The SearXNG instance URL
+        num_results: Maximum number of results to return
+        output_file: File to save crawled content to, or None to skip saving
+        verbose: Whether to enable verbose output
+        
+    Returns:
+        Tuple of (list of URLs, dictionary mapping URLs to their content)
+    """
+    # Search for URLs
+    urls = search(query, searx_url, num_results)
+    
+    if not urls:
+        return [], {}
+    
+    # Crawl the URLs
+    crawled_content = crawl_urls(urls, output_file, verbose)
+    
+    return urls, crawled_content

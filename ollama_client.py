@@ -2,16 +2,15 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+MODEL = "gpt-oss:20b"
+
 
 def _fallback_clarifying_questions(question: str) -> Dict[str, List[str]]:
   """Fallback research plan when LLM is unavailable"""
-  # Generate basic sub-questions based on question analysis
   q_lower = question.lower()
   
-  # Default fields
   fields: List[str] = ["timeframe", "scope", "sources", "focus_area"]
   
-  # Generate contextual sub-questions
   qs: List[str] = []
   
   if "news" in q_lower or "recent" in q_lower:
@@ -33,7 +32,6 @@ def _fallback_clarifying_questions(question: str) -> Dict[str, List[str]]:
       "Are there specific aspects to focus on?"
     ])
   
-  # Add location-specific question if location mentioned
   if any(loc in q_lower for loc in ["country", "city", "region", "morocco", "france", "usa"]):
     qs.append("Should we focus on specific geographic regions or locations?")
   
@@ -45,13 +43,12 @@ def generate_next_question(original_question: str, previous_qa: list[tuple[str, 
   Generate the next clarifying question based on the original question and previous Q&As.
   Returns empty string if no more questions needed or on error.
   """
-  if question_num > 3:  # Max 3 questions
+  if question_num > 3:
     return ""
     
   try:
-    import ollama  # type: ignore
+    import ollama
 
-    # Build context from previous Q&As
     context = f"Original question: {original_question}\n"
     if previous_qa:
       context += "Previous clarifications:\n"
@@ -72,7 +69,7 @@ def generate_next_question(original_question: str, previous_qa: list[tuple[str, 
     )
     
     resp = ollama.chat(
-      model="llama3.1:8b",
+      model=MODEL,
       messages=[
         {"role": "system", "content": system},
         {"role": "user", "content": user},
@@ -104,7 +101,7 @@ def generate_clarifying_questions(question: str) -> Dict[str, List[str]]:
   """
   try:
     import json
-    import ollama  # type: ignore
+    import ollama
 
     system = (
       "You are a research assistant that creates detailed research plans. "
@@ -124,7 +121,7 @@ def generate_clarifying_questions(question: str) -> Dict[str, List[str]]:
     )
     
     resp = ollama.chat(
-      model="llama3.1:8b",
+      model=MODEL,
       messages=[
         {"role": "system", "content": system},
         {"role": "user", "content": user},
