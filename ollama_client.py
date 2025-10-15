@@ -165,3 +165,121 @@ def generate_clarifying_questions(question: str) -> Dict[str, List[str]]:
 
   return _fallback_clarifying_questions(question)
 
+
+def generate_search_query_from_answer(original_question: str, question: str, answer: str) -> str:
+  """
+  Generate a search query based on the original question and a clarifying question-answer pair.
+  
+  Args:
+      original_question: The user's original research question
+      question: The clarifying question that was asked
+      answer: The user's answer to the clarifying question
+      
+  Returns:
+      A search query that incorporates the clarification
+  """
+  try:
+    import ollama
+    
+    system = (
+      "You are a search query optimizer. Your task is to create an optimized search query "
+      "that combines the original research question with additional context from a "
+      "clarifying question and its answer. The search query should be concise, focused, "
+      "and use keywords that would lead to the most relevant search results."
+    )
+    
+    user = (
+      f"Original research question: {original_question}\n\n"
+      f"Clarifying question: {question}\n"
+      f"User's answer: {answer}\n\n"
+      "Based on this information, generate a concise and specific search query that "
+      "would return the most relevant results. Focus on using keywords that would "
+      "be effective for a search engine. Return only the optimized search query text, "
+      "without quotes or explanations."
+    )
+    
+    resp = ollama.chat(
+      model=MODEL,
+      messages=[
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+      ],
+    )
+    
+    query = resp.get("message", {}).get("content", "").strip()
+    
+    # Clean up any formatting or quotes
+    query = query.strip('"\'').strip()
+    
+    # If the generated query is too short or empty, fall back to original question
+    if not query or len(query) < 10:
+      return original_question
+    
+    return query
+    
+  except Exception as e:
+    print(f"Search query generation failed: {e}")
+    # Fall back to combining the original question with the answer
+    return f"{original_question} {answer}"
+
+
+def generate_combined_search_query(original_question: str, qa_pairs: list[tuple[str, str]]) -> str:
+  """
+  Generate a combined search query from the original question and all Q&A pairs.
+  
+  Args:
+      original_question: The user's original research question
+      qa_pairs: List of (question, answer) tuples from clarification
+      
+  Returns:
+      A comprehensive search query
+  """
+  try:
+    import ollama
+    
+    if not qa_pairs:
+      return original_question
+    
+    context = f"Original research question: {original_question}\n\nClarifications:\n"
+    for q, a in qa_pairs:
+      context += f"Q: {q}\nA: {a}\n\n"
+    
+    system = (
+      "You are a search query optimizer that creates comprehensive search queries. "
+      "Given an original research question and clarifications from the user, "
+      "create ONE optimized search query that integrates all the information. "
+      "The query should be concise but comprehensive, focusing on the most important keywords "
+      "that would yield relevant search results."
+    )
+    
+    user = (
+      f"{context}\n"
+      "Based on all this information, create ONE optimized search query that would return "
+      "the most relevant results. Focus on using keywords that would be effective for a search engine. "
+      "Return only the optimized search query text, without quotes or explanations."
+    )
+    
+    resp = ollama.chat(
+      model=MODEL,
+      messages=[
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+      ],
+    )
+    
+    query = resp.get("message", {}).get("content", "").strip()
+    
+    # Clean up any formatting or quotes
+    query = query.strip('"\'').strip()
+    
+    # If the generated query is too short or empty, fall back to original question
+    if not query or len(query) < 10:
+      return original_question
+    
+    return query
+    
+  except Exception as e:
+    print(f"Combined search query generation failed: {e}")
+    # Fall back to original question
+    return original_question
+

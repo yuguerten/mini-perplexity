@@ -8,7 +8,7 @@ from typing import Dict, List
 from uuid import uuid4
 
 from ollama_client import generate_clarifying_questions, generate_next_question
-from searx_client import search, search_from_query_file, crawl_urls, search_and_crawl, summarize_crawled_content
+from searx_client import search, search_from_query_file, crawl_urls, search_and_crawl, summarize_crawled_content, search_crawl_and_summarize
 
 MODEL = "gpt-oss:20b"
 
@@ -121,29 +121,54 @@ def main() -> None:
 
     print(f"Saved session to {out_path}")
     
-    # Perform search using SearXNG for the original question
+    # Perform search using SearXNG for the original question and clarifications
     print("\n=== Searching for relevant sources ===")
     try:
+        from ollama_client import generate_search_query_from_answer, generate_combined_search_query
+        
         searx_url = os.getenv('SEARXNG_URL', 'http://localhost:8080')
         max_results = 10  # Default to 10 results
         
-        # Suppress verbose output from search function by temporarily redirecting stdout
-        import sys
-        from io import StringIO
+        # Generate search queries from clarifying answers
+        additional_queries = []
         
-        original_stdout = sys.stdout
-        sys.stdout = original_stdout
+        # Convert answers dictionary to list of pairs
+        qa_pairs = list(answers.items())
+        
+        if qa_pairs:
+            print("Generating optimized search queries based on your answers...")
+            
+            # Generate individual queries from each question-answer pair
+            for question, answer in qa_pairs:
+                if answer.strip():  # Only process non-empty answers
+                    query = generate_search_query_from_answer(original_question, question, answer)
+                    if query and query != original_question:
+                        additional_queries.append(query)
+                        print(f"Generated query: {query}")
+            
+            # Also generate a combined query from all Q&A pairs
+            if len(qa_pairs) > 1:
+                combined_query = generate_combined_search_query(original_question, qa_pairs)
+                if combined_query and combined_query != original_question:
+                    additional_queries.append(combined_query)
+                    print(f"Generated combined query: {combined_query}")
         
         # Perform the search and crawl the results
         crawl_output_file = f"crawled_content_{qid}.txt"
-        summary_output_file = f"summaries_{qid}.txt"
+        summary_output_file = f"summaries_{qid}.md"
         
-        urls, crawled_content = search_and_crawl(
+        print(f"\nSearching using {1 + len(additional_queries)} queries...")
+        
+        urls, crawled_content, summaries = search_crawl_and_summarize(
             original_question, 
             searx_url, 
             max_results,
-            output_file=crawl_output_file,
-            verbose=True
+            model=MODEL,
+            crawl_output_file=crawl_output_file,
+            summary_output_file=summary_output_file,
+            verbose=True,
+            additional_queries=additional_queries,
+            clarification_qa=qa_pairs
         )
         
         if urls:
@@ -152,16 +177,18 @@ def main() -> None:
                 content_status = "✓ Content extracted" if url in crawled_content else "✗ No content extracted"
                 print(f"{i}. {url} - {content_status}")
                 
-            # Summarize the crawled content if available
+            # Update query data with the search queries that were used
+            payload["search_queries"] = {
+                "original": original_question,
+                "additional": additional_queries,
+                "total": 1 + len(additional_queries)
+            }
+                
+            # Process was already handled by search_crawl_and_summarize
+            # Just update the output message
             if crawled_content:
                 print(f"\nCrawling complete: {len(crawled_content)}/{len(urls)} URLs successfully crawled")
-                print("Summarizing findings...")
-                
-                summaries = summarize_crawled_content(
-                    crawled_content,
-                    model=MODEL,
-                    output_file=summary_output_file
-                )
+                print(f"Research report saved to: {summary_output_file}")
                 
                 # Update the query file with crawled content and summary information
                 payload["crawled_content"] = {

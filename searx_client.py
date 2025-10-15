@@ -329,17 +329,19 @@ def search_and_crawl(query: str, searx_url: str = None, num_results: int = 10,
     return urls, crawled_content
 
 
-def summarize_content(url: str, content: str, model: str = "gpt-oss:20b") -> str:
+def summarize_content(url: str, content: str, original_question: str = "", model: str = "gpt-oss:20b", reference_id: int = 0) -> str:
     """
-    Use an LLM to summarize the content from a URL.
+    Use an LLM to summarize the content from a URL in relation to the user's question.
     
     Args:
         url: The URL that was crawled
         content: The content to summarize
+        original_question: The user's original research question
         model: The model to use for summarization
+        reference_id: The reference ID to use in citations
         
     Returns:
-        Summarized content as a string
+        Summarized content as a string with citation reference
     """
     if not OLLAMA_AVAILABLE:
         return "Error: ollama package not available. Install with: uv pip install ollama"
@@ -353,23 +355,32 @@ def summarize_content(url: str, content: str, model: str = "gpt-oss:20b") -> str
         content = content[:max_content_length] + "...(content truncated)"
     
     try:
+        question_context = f"Research question: {original_question}" if original_question else "No specific research question provided."
+        
         system_prompt = """
-        You are a helpful assistant that creates concise, accurate summaries of web content.
+        You are a research assistant that creates focused, relevant summaries of web content.
         Your summaries should:
-        - Be 2-3 short paragraphs
-        - Capture the main points and key information
+        - Be directly relevant to the user's research question
+        - Extract only information that helps answer the research question
+        - Include citations using [n] format where n is the reference number
         - Be factual and objective
         - Focus on substantive content, ignoring navigation, ads, etc.
-        - Provide the most useful information from the source
+        - Be concise (2-3 paragraphs maximum)
+        
+        If the content isn't relevant to the research question, briefly explain why.
         """
         
         user_prompt = f"""
+        {question_context}
+        
         Please summarize the following content from URL: {url}
+        Reference number to use for citation: [{reference_id}]
         
         Content:
         {content}
         
-        Provide a concise summary of the key information in 2-3 paragraphs.
+        Provide a concise summary that focuses ONLY on information relevant to the research question.
+        Include the citation reference [{ reference_id }] when referencing information from this source.
         """
         
         response = ollama.chat(
@@ -388,14 +399,18 @@ def summarize_content(url: str, content: str, model: str = "gpt-oss:20b") -> str
 
 
 def summarize_crawled_content(crawled_content: Dict[str, str], 
-                             model: str = "gpt-oss:20b", 
+                             model: str = "gpt-oss:20b",
+                             original_question: str = "",
+                             clarification_qa: List[Tuple[str, str]] = None,
                              output_file: Optional[str] = None) -> Dict[str, str]:
     """
-    Summarize all crawled content and optionally save to a file.
+    Summarize all crawled content and optionally save to a markdown file with references.
     
     Args:
         crawled_content: Dictionary mapping URLs to their content
         model: The model to use for summarization
+        original_question: The user's original research question
+        clarification_qa: List of (question, answer) pairs from clarifications
         output_file: File to save summaries to, or None to skip saving
         
     Returns:
@@ -412,52 +427,201 @@ def summarize_crawled_content(crawled_content: Dict[str, str],
     print(f"\nSummarizing content from {len(crawled_content)} URLs...")
     summaries = {}
     
+    # Change output file extension to .md if it's .txt
+    if output_file and output_file.endswith('.txt'):
+        output_file = output_file[:-4] + '.md'
+    
+    # First pass: Generate individual summaries with reference IDs
+    urls_list = list(crawled_content.keys())
+    
     # Use tqdm to show progress
-    for url in tqdm(crawled_content.keys(), desc="Summarizing", unit="url"):
+    for i, url in enumerate(tqdm(urls_list, desc="Summarizing", unit="url")):
         content = crawled_content[url]
-        summary = summarize_content(url, content, model)
+        # Pass the reference ID (1-based) for citation
+        summary = summarize_content(url, content, original_question, model, i + 1)
         summaries[url] = summary
     
-    # Write summaries to file if specified
+    # Second pass: Generate a consolidated report
     if output_file and summaries:
         with open(output_file, "w", encoding="utf-8") as f:
-            for url, summary in summaries.items():
-                f.write(f"{url}\n")
-                f.write("="*50 + "\n")
-                f.write(summary)
-                f.write("\n" + "="*50 + "\n\n")
+            # Write the title and question
+            f.write(f"# Research Summary\n\n")
+            
+            if original_question:
+                f.write(f"**Research Question:** {original_question}\n\n")
+            
+            # Add clarifications if available
+            if clarification_qa:
+                f.write("## Clarifications\n\n")
+                for question, answer in clarification_qa:
+                    f.write(f"**Q: {question}**\n\n")
+                    f.write(f"A: {answer}\n\n")
+                f.write("\n")
+            
+            # Write the consolidated summary section
+            f.write("## Summary\n\n")
+            
+            # Generate an integrated summary if we have the capability
+            try:
+                if OLLAMA_AVAILABLE and original_question:
+                    # Prepare a condensed version of summaries to fit into context
+                    condensed_summaries = []
+                    for i, (url, summary) in enumerate(summaries.items()):
+                        # Keep summaries brief for the consolidated report
+                        short_summary = summary[:500] + "..." if len(summary) > 500 else summary
+                        condensed_summaries.append(f"Source [{i+1}]: {short_summary}")
+                    
+                    all_summaries_text = "\n\n".join(condensed_summaries)
+                    
+                    # Add clarification context
+                    clarification_context = ""
+                    if clarification_qa:
+                        clarification_context = "User clarifications:\n"
+                        for q, a in clarification_qa:
+                            clarification_context += f"Q: {q}\nA: {a}\n\n"
+                    
+                    system_prompt = """
+                    You are a research assistant creating a consolidated report from multiple sources.
+                    Write a coherent, well-structured summary that:
+                    1. Directly addresses the research question and user clarifications
+                    2. Integrates information from multiple sources using [n] citations
+                    3. Is factual and objective
+                    4. Presents the most relevant information first
+                    5. Is concise but comprehensive (3-4 paragraphs)
+                    6. Uses clear language and formatting appropriate for a research report
+                    """
+                    
+                    user_prompt = f"""
+                    Research Question: {original_question}
+                    
+                    {clarification_context if clarification_context else ""}
+                    Below are summaries from different sources with their reference numbers:
+                    
+                    {all_summaries_text}
+                    
+                    Write a consolidated research report that integrates these sources to address the research question
+                    and incorporates the user's clarifications. Use the citation format [n] to reference the sources.
+                    """
+                    
+                    response = ollama.chat(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                    )
+                    
+                    consolidated_report = response.get("message", {}).get("content", "").strip()
+                    
+                    # Write the consolidated report
+                    f.write(f"{consolidated_report}\n\n")
+                else:
+                    # If no LLM available or no question, just write all summaries
+                    for i, (url, summary) in enumerate(summaries.items()):
+                        f.write(f"{summary}\n\n")
+            except Exception as e:
+                print(f"Error generating consolidated report: {e}")
+                # Fallback: write individual summaries
+                for i, (url, summary) in enumerate(summaries.items()):
+                    f.write(f"{summary}\n\n")
+            
+            # Write the references section
+            f.write("## References\n\n")
+            for i, url in enumerate(urls_list):
+                f.write(f"[{i+1}] {url}\n\n")
         
-        print(f"Summaries saved to: {output_file}")
+        print(f"Research report saved to: {output_file}")
     
     return summaries
+
+
+def search_with_multiple_queries(queries: List[str], searx_url: str = None, 
+                           num_results_per_query: int = 5, verbose: bool = False) -> List[str]:
+    """
+    Search using multiple queries and return a combined list of unique URLs.
+    
+    Args:
+        queries: List of search queries
+        searx_url: The SearXNG instance URL
+        num_results_per_query: Maximum number of results to return per query
+        verbose: Whether to enable verbose output
+        
+    Returns:
+        List of unique URLs from all search results
+    """
+    all_urls = []
+    unique_urls = set()
+    
+    for i, query in enumerate(queries, 1):
+        if verbose:
+            print(f"Search query {i}/{len(queries)}: '{query}'")
+            
+        # Search for URLs using the current query
+        urls = search(query, searx_url, num_results_per_query)
+        
+        # Add only new URLs to the list (avoid duplicates)
+        for url in urls:
+            if url not in unique_urls:
+                unique_urls.add(url)
+                all_urls.append(url)
+    
+    if verbose:
+        print(f"Found {len(all_urls)} unique URLs across {len(queries)} queries")
+        
+    return all_urls
 
 
 def search_crawl_and_summarize(query: str, searx_url: str = None, num_results: int = 10,
                               model: str = "gpt-oss:20b", 
                               crawl_output_file: Optional[str] = None,
                               summary_output_file: Optional[str] = None,
-                              verbose: bool = False) -> Tuple[List[str], Dict[str, str], Dict[str, str]]:
+                              verbose: bool = False,
+                              additional_queries: List[str] = None,
+                              clarification_qa: List[Tuple[str, str]] = None) -> Tuple[List[str], Dict[str, str], Dict[str, str]]:
     """
     Complete workflow: search, crawl, and summarize content.
     
     Args:
-        query: The search query
+        query: The primary search query (original question)
         searx_url: The SearXNG instance URL
-        num_results: Maximum number of results to return
+        num_results: Maximum number of results to return per query
         model: The model to use for summarization
         crawl_output_file: File to save crawled content to, or None to skip saving
         summary_output_file: File to save summaries to, or None to skip saving
         verbose: Whether to enable verbose output
+        additional_queries: Additional search queries derived from clarifications
+        clarification_qa: List of (question, answer) pairs from clarifications
         
     Returns:
         Tuple of (list of URLs, dictionary of contents, dictionary of summaries)
     """
-    # Search and crawl
-    urls, crawled_content = search_and_crawl(
-        query, searx_url, num_results, crawl_output_file, verbose
-    )
+    # Combine all queries
+    all_queries = [query]
+    if additional_queries:
+        all_queries.extend(additional_queries)
     
-    # Summarize
-    summaries = summarize_crawled_content(crawled_content, model, summary_output_file)
+    # Search with all queries and get unique URLs
+    if len(all_queries) > 1:
+        # Adjust results per query to avoid overwhelming number of results
+        results_per_query = max(3, num_results // len(all_queries))
+        urls = search_with_multiple_queries(all_queries, searx_url, results_per_query, verbose)
+    else:
+        # Just use the original query
+        urls = search(query, searx_url, num_results)
+    
+    if not urls:
+        return [], {}, {}
+    
+    # Crawl the URLs
+    crawled_content = crawl_urls(urls, crawl_output_file, verbose)
+    
+    # Summarize - pass the original query and clarifications to align the summary
+    summaries = summarize_crawled_content(
+        crawled_content, 
+        model=model, 
+        original_question=query,
+        clarification_qa=clarification_qa, 
+        output_file=summary_output_file
+    )
     
     return urls, crawled_content, summaries
