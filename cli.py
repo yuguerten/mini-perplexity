@@ -8,7 +8,7 @@ from typing import Dict, List
 from uuid import uuid4
 
 from ollama_client import generate_clarifying_questions, generate_next_question
-from searx_client import search, search_from_query_file, crawl_urls, search_and_crawl
+from searx_client import search, search_from_query_file, crawl_urls, search_and_crawl, summarize_crawled_content
 
 MODEL = "gpt-oss:20b"
 
@@ -135,12 +135,14 @@ def main() -> None:
         sys.stdout = original_stdout
         
         # Perform the search and crawl the results
-        output_file = f"crawled_content_{qid}.txt"
+        crawl_output_file = f"crawled_content_{qid}.txt"
+        summary_output_file = f"summaries_{qid}.txt"
+        
         urls, crawled_content = search_and_crawl(
             original_question, 
             searx_url, 
             max_results,
-            output_file=output_file,
+            output_file=crawl_output_file,
             verbose=True
         )
         
@@ -150,10 +152,21 @@ def main() -> None:
                 content_status = "✓ Content extracted" if url in crawled_content else "✗ No content extracted"
                 print(f"{i}. {url} - {content_status}")
                 
-            # Update the query file with crawled content information
+            # Summarize the crawled content if available
             if crawled_content:
+                print(f"\nCrawling complete: {len(crawled_content)}/{len(urls)} URLs successfully crawled")
+                print("Summarizing findings...")
+                
+                summaries = summarize_crawled_content(
+                    crawled_content,
+                    model=MODEL,
+                    output_file=summary_output_file
+                )
+                
+                # Update the query file with crawled content and summary information
                 payload["crawled_content"] = {
-                    "file": output_file,
+                    "crawl_file": crawl_output_file,
+                    "summary_file": summary_output_file,
                     "count": len(crawled_content),
                     "urls": list(crawled_content.keys())
                 }
@@ -162,7 +175,8 @@ def main() -> None:
                 with out_path.open("w", encoding="utf-8") as f:
                     json.dump(payload, f, ensure_ascii=False, indent=2)
                 
-                print(f"\nContent extracted and saved to {output_file}")
+                print(f"\nContent extracted and saved to {crawl_output_file}")
+                print(f"Summaries saved to {summary_output_file}")
             else:
                 print("\nNo content was extracted from the sources.")
         else:
