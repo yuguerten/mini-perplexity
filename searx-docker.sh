@@ -8,7 +8,7 @@ case "$1" in
         docker compose up -d searxng redis
         echo "Waiting for SearXNG to be ready..."
         sleep 10
-        echo "SearXNG should be available at http://localhost:8081"
+        echo "SearXNG should be available at http://localhost:8080"
         echo "You can test it with: python test_searx.py"
         ;;
     "stop")
@@ -21,7 +21,7 @@ case "$1" in
         ;;
     "test")
         echo "Testing SearXNG connection..."
-        curl -s "http://localhost:8081/search?q=test&format=json" | jq '.results | length' 2>/dev/null || echo "SearXNG not responding or jq not installed"
+        curl -s "http://localhost:8080/search?q=test&format=json" | jq '.results | length' 2>/dev/null || echo "SearXNG not responding or jq not installed"
         ;;
     "restart")
         echo "Restarting SearXNG..."

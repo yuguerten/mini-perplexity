@@ -10,7 +10,7 @@ from uuid import uuid4
 from ollama_client import generate_clarifying_questions, generate_next_question
 from searx_client import search, search_from_query_file, crawl_urls, search_and_crawl, summarize_crawled_content, search_crawl_and_summarize
 
-MODEL = "gpt-oss:20b"
+MODEL = "deepseek-r1:1.5b"
 
 def _input_with_default(prompt: str, default: str) -> str:
     raw = input(prompt).strip()

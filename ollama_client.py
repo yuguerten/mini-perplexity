@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-MODEL = "gpt-oss:20b"
+MODEL = "deepseek-r1:1.5b"
 
 
 def _fallback_clarifying_questions(question: str) -> Dict[str, List[str]]:
