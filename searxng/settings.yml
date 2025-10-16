@@ -4,7 +4,7 @@ use_default_settings: true
 server:
   port: 8080
   bind_address: "0.0.0.0"
-  secret_key: "mini-perplexity-secret-key-20251013"  # Fixed random secret key
+  secret_key: "mini-perplexity-secret-key-20251013"
   base_url: false
   image_proxy: false
 
@@ -18,6 +18,31 @@ search:
   formats:
     - html
     - json
+  categories:
+    general:
+      name: General
+    web:
+      name: Web
+    news:
+      name: News
+    images: 
+      name: Images
+    videos:
+      name: Videos
+    science:
+      name: Science
+    academic:
+      name: Academic
+    research:
+      name: Research
+    papers:
+      name: Papers
+    medical:
+      name: Medical
+    health:
+      name: Health
+    doi:
+      name: DOI
 
 enabled_plugins:
   - 'Hash plugin'
@@ -30,36 +55,74 @@ engines:
     engine: google
     shortcut: go
     use_mobile_ui: false
+    categories: 
+      - general
+      - web
+      - news
+      - images
+      - videos
 
   - name: duckduckgo
     engine: duckduckgo
     shortcut: ddg
+    categories:
+      - general
+      - web
+      - news
+      - images
+      - videos
 
   - name: bing
     engine: bing
     shortcut: bi
+    categories:
+      - general
+      - web
+      - news
+      - images
+      - videos
 
   - name: arxiv
     engine: arxiv
     shortcut: arx
-    categories: science
+    categories: 
+      - science
+      - academic
+      - research
+      - papers
 
   - name: google scholar
     engine: google_scholar
     shortcut: gs
-    categories: science
+    categories: 
+      - science
+      - academic
+      - research
+      - papers
 
   - name: semantic scholar
     engine: semantic_scholar
     shortcut: se
-    categories: science
+    categories: 
+      - science
+      - academic
+      - research
+      - papers
 
   - name: pubmed
     engine: pubmed
     shortcut: pub
-    categories: science
+    categories: 
+      - science
+      - medical
+      - health
+      - research
 
   - name: crossref
     engine: crossref
     shortcut: cr
-    categories: science
+    categories: 
+      - science
+      - academic
+      - papers
+      - doi
