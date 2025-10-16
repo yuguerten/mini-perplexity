@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import requests
 import re
-import yaml
 from typing import List, Dict, Any, Optional, Tuple
 import json
 import os
@@ -31,32 +30,7 @@ except ImportError:
     OLLAMA_AVAILABLE = False
 
 
-def load_searx_settings(settings_path: str = None) -> Dict[str, Any]:
-    """
-    Load SearXNG settings from settings.yml file.
-    
-    Args:
-        settings_path: Path to the settings.yml file (defaults to searxng/settings.yml)
-        
-    Returns:
-        Dictionary containing the SearXNG settings
-    """
-    if settings_path is None:
-        settings_path = os.path.join(os.getcwd(), 'searxng', 'settings.yml')
-    
-    try:
-        with open(settings_path, 'r', encoding='utf-8') as f:
-            settings = yaml.safe_load(f)
-        return settings
-    except FileNotFoundError:
-        print(f"Settings file not found: {settings_path}")
-        return {}
-    except yaml.YAMLError as e:
-        print(f"Error parsing settings file: {e}")
-        return {}
-
-
-def search(query: str, searx_url: str = None, num_results: int = 10, settings_path: str = None) -> List[str]:
+def search(query: str, searx_url: str = None, num_results: int = 10) -> List[str]:
     """
     Search using SearXNG and return a list of URLs.
     
@@ -64,28 +38,13 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
         query: The search query (original_question)
         searx_url: The SearXNG instance URL (defaults to Docker container or env var)
         num_results: Maximum number of results to return
-        settings_path: Path to the settings.yml file
         
     Returns:
         List of URLs from search results
     """
-    # Load settings from YAML file
-    settings = load_searx_settings(settings_path)
-    
-    # Use URL from settings if available, then env var, then default
+    # Use Docker container URL by default, fallback to environment variable or public instance
     if searx_url is None:
-        if settings and 'server' in settings and 'base_url' in settings['server'] and settings['server']['base_url']:
-            # If base_url is set in settings, use it
-            server_base = settings['server']['base_url']
-            port = settings['server'].get('port', 8080)
-            bind_address = settings['server'].get('bind_address', '127.0.0.1')
-            searx_url = f"{server_base}" if server_base.startswith('http') else f"http://{server_base}"
-        else:
-            # Otherwise use bind_address and port from settings or default
-            port = settings.get('server', {}).get('port', 8080)
-            bind_address = settings.get('server', {}).get('bind_address', '127.0.0.1')
-            # Use environment variable if set, otherwise construct URL from settings
-            searx_url = os.getenv('SEARXNG_URL', f"http://{bind_address}:{port}")
+        searx_url = os.getenv('SEARXNG_URL', 'http://localhost:8080')
     
     try:
         # Clean query by removing control characters
@@ -94,29 +53,11 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
         # SearXNG search endpoint
         search_url = f"{searx_url}/search"
         
-        # Get categories from settings if available
-        default_categories = 'general,science'
-        if settings and 'engines' in settings:
-            # Extract unique categories from engines
-            categories_set = set()
-            for engine in settings['engines']:
-                if 'categories' in engine:
-                    if isinstance(engine['categories'], list):
-                        categories_set.update(engine['categories'])
-                    elif isinstance(engine['categories'], str):
-                        categories_set.add(engine['categories'])
-            
-            if categories_set:
-                default_categories = ','.join(categories_set)
-        
-        # Get safe search setting if available
-        safe_search = settings.get('search', {}).get('safe_search', '0')
-        
         # Parameters for the search
         params = {
             'q': query,
-            'categories': default_categories,  # Use categories from settings
-            'safesearch': str(safe_search),   # Use safe search from settings
+            'categories': 'general,science',  # Focus on general and science categories for academic papers
+            'safesearch': '0',  # No safe search filtering
             'pageno': '1'  # First page
         }
         
@@ -183,7 +124,7 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
         return []
 
 
-def search_from_query_file(query_file_path: str, searx_url: str = None, num_results: int = 10, settings_path: str = None) -> List[str]:
+def search_from_query_file(query_file_path: str, searx_url: str = None, num_results: int = 10) -> List[str]:
     """
     Load a query JSON file and search using the original_question.
     
@@ -191,12 +132,13 @@ def search_from_query_file(query_file_path: str, searx_url: str = None, num_resu
         query_file_path: Path to the query JSON file
         searx_url: The SearXNG instance URL (defaults to Docker container or env var)
         num_results: Maximum number of results to return
-        settings_path: Path to the settings.yml file
         
     Returns:
         List of URLs from search results
     """
-    # Let search function handle the URL and settings
+    if searx_url is None:
+        searx_url = os.getenv('SEARXNG_URL', 'http://localhost:8080')
+        
     try:
         with open(query_file_path, 'r', encoding='utf-8') as f:
             query_data = json.load(f)
@@ -212,7 +154,7 @@ def search_from_query_file(query_file_path: str, searx_url: str = None, num_resu
         print(f"Loading query from: {query_file_path}")
         print(f"Original question: {original_question}")
         
-        return search(original_question, searx_url, num_results, settings_path)
+        return search(original_question, searx_url, num_results)
         
     except FileNotFoundError:
         print(f"Query file not found: {query_file_path}")
@@ -361,8 +303,7 @@ def crawl_urls(urls: List[str], output_file: Optional[str] = None, verbose: bool
 
 
 def search_and_crawl(query: str, searx_url: str = None, num_results: int = 10, 
-                     output_file: Optional[str] = None, verbose: bool = False,
-                     settings_path: str = None) -> Tuple[List[str], Dict[str, str]]:
+                     output_file: Optional[str] = None, verbose: bool = False) -> Tuple[List[str], Dict[str, str]]:
     """
     Search using SearXNG and then crawl the resulting URLs.
     
@@ -372,13 +313,12 @@ def search_and_crawl(query: str, searx_url: str = None, num_results: int = 10,
         num_results: Maximum number of results to return
         output_file: File to save crawled content to, or None to skip saving
         verbose: Whether to enable verbose output
-        settings_path: Path to the settings.yml file
         
     Returns:
         Tuple of (list of URLs, dictionary mapping URLs to their content)
     """
-    # Search for URLs using settings from YAML
-    urls = search(query, searx_url, num_results, settings_path)
+    # Search for URLs
+    urls = search(query, searx_url, num_results)
     
     if not urls:
         return [], {}
@@ -596,8 +536,7 @@ def summarize_crawled_content(crawled_content: Dict[str, str],
 
 
 def search_with_multiple_queries(queries: List[str], searx_url: str = None, 
-                           num_results_per_query: int = 5, verbose: bool = False,
-                           settings_path: str = None) -> List[str]:
+                           num_results_per_query: int = 5, verbose: bool = False) -> List[str]:
     """
     Search using multiple queries and return a combined list of unique URLs.
     
@@ -606,7 +545,6 @@ def search_with_multiple_queries(queries: List[str], searx_url: str = None,
         searx_url: The SearXNG instance URL
         num_results_per_query: Maximum number of results to return per query
         verbose: Whether to enable verbose output
-        settings_path: Path to the settings.yml file
         
     Returns:
         List of unique URLs from all search results
@@ -618,8 +556,8 @@ def search_with_multiple_queries(queries: List[str], searx_url: str = None,
         if verbose:
             print(f"Search query {i}/{len(queries)}: '{query}'")
             
-        # Search for URLs using the current query and settings from YAML
-        urls = search(query, searx_url, num_results_per_query, settings_path)
+        # Search for URLs using the current query
+        urls = search(query, searx_url, num_results_per_query)
         
         # Add only new URLs to the list (avoid duplicates)
         for url in urls:
@@ -639,8 +577,7 @@ def search_crawl_and_summarize(query: str, searx_url: str = None, num_results: i
                               summary_output_file: Optional[str] = None,
                               verbose: bool = False,
                               additional_queries: List[str] = None,
-                              clarification_qa: List[Tuple[str, str]] = None,
-                              settings_path: str = None) -> Tuple[List[str], Dict[str, str], Dict[str, str]]:
+                              clarification_qa: List[Tuple[str, str]] = None) -> Tuple[List[str], Dict[str, str], Dict[str, str]]:
     """
     Complete workflow: search, crawl, and summarize content.
     
@@ -667,10 +604,10 @@ def search_crawl_and_summarize(query: str, searx_url: str = None, num_results: i
     if len(all_queries) > 1:
         # Adjust results per query to avoid overwhelming number of results
         results_per_query = max(3, num_results // len(all_queries))
-        urls = search_with_multiple_queries(all_queries, searx_url, results_per_query, verbose, settings_path)
+        urls = search_with_multiple_queries(all_queries, searx_url, results_per_query, verbose)
     else:
         # Just use the original query
-        urls = search(query, searx_url, num_results, settings_path)
+        urls = search(query, searx_url, num_results)
     
     if not urls:
         return [], {}, {}
