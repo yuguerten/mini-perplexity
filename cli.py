@@ -8,7 +8,7 @@ from typing import Dict, List
 from uuid import uuid4
 
 from ollama_client import generate_clarifying_questions, generate_next_question
-from searx_client import search, search_from_query_file, crawl_urls, search_and_crawl, summarize_crawled_content, search_crawl_and_summarize, read_crawled_content
+from searx_client import search, search_from_query_file, crawl_urls, search_and_crawl, search_crawl_and_summarize, read_crawled_content
 
 MODEL = "gpt-oss:20b"
 
@@ -44,15 +44,10 @@ def main() -> None:
     if not original_question:
         print("Please provide a research question. Exiting.")
         return
-
-    breadth = _input_int("Enter research breadth (recommended 2-10, default 4): ", default=4, min_v=1, max_v=20)
-    depth = _input_int("Enter research depth (recommended 1-5, default 2): ", default=2, min_v=1, max_v=10)
-    report_kind = _input_with_default(
-        "Do you want to generate a long report or a specific answer? (report/answer, default report): ",
-        "report",
-    ).lower()
-    if report_kind not in {"report", "answer"}:
-        report_kind = "report"
+    
+    breadth = 4
+    depth = 2
+    report_kind = "report"
 
     print("Creating research plan..")
 
@@ -168,7 +163,8 @@ def main() -> None:
             summary_output_file=summary_output_file,
             verbose=True,
             additional_queries=additional_queries,
-            clarification_qa=qa_pairs
+            clarification_qa=qa_pairs,
+            batch_size=10  # Process 10 URLs concurrently for better performance
         )
         
         if urls:

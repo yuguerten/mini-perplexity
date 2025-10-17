@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import requests
 import re
 import yaml
@@ -223,29 +224,6 @@ def search_from_query_file(query_file_path: str, searx_url: str = None, num_resu
         print(f"Error loading query file: {e}")
         return []
 
-
-def get_latest_query_file() -> Optional[str]:
-    """
-    Find the latest query JSON file in the queries directory.
-    
-    Returns:
-        Path to the latest query file or None if none found
-    """
-    try:
-        queries_dir = os.path.join(os.getcwd(), "queries")
-        if not os.path.exists(queries_dir):
-            return None
-        
-        query_files = [f for f in os.listdir(queries_dir) if f.endswith('.json')]
-        if not query_files:
-            return None
-        
-        latest_file = max(query_files, key=lambda f: os.path.getmtime(os.path.join(queries_dir, f)))
-        return os.path.join(queries_dir, latest_file)
-    except Exception:
-        return None
-
-
 async def crawl_url(url: str, verbose: bool = False) -> Optional[str]:
     """
     Fetch content from a URL using crawl4ai.
@@ -294,12 +272,13 @@ async def crawl_url(url: str, verbose: bool = False) -> Optional[str]:
         return None
 
 
-async def crawl_multiple_urls(urls: List[str], verbose: bool = False) -> Dict[str, str]:
+async def crawl_multiple_urls_batched(urls: List[str], batch_size: int = 5, verbose: bool = False) -> Dict[str, str]:
     """
-    Crawl multiple URLs in parallel and return their content.
+    Crawl multiple URLs in parallel batches and return their content.
     
     Args:
         urls: List of URLs to crawl
+        batch_size: Number of URLs to process concurrently
         verbose: Whether to enable verbose output
         
     Returns:
@@ -312,24 +291,37 @@ async def crawl_multiple_urls(urls: List[str], verbose: bool = False) -> Dict[st
     if not urls:
         return {}
     
-    print(f"Crawling {len(urls)} URLs...")
+    results = {}
+    total_batches = (len(urls) + batch_size - 1) // batch_size
     
-    # Process each URL in parallel
-    tasks = [crawl_url(url, verbose) for url in urls]
-    results = await asyncio.gather(*tasks)
-    
-    # Create a dictionary of URL -> content
-    return {url: content for url, content in zip(urls, results) if content is not None}
+    for batch_num in range(total_batches):
+        start_idx = batch_num * batch_size
+        end_idx = min(start_idx + batch_size, len(urls))
+        batch_urls = urls[start_idx:end_idx]
+        
+        print(f"Processing batch {batch_num+1}/{total_batches} ({len(batch_urls)} URLs)...")
+        
+        # Process each URL in the current batch in parallel
+        tasks = [crawl_url(url, verbose) for url in batch_urls]
+        batch_results = await asyncio.gather(*tasks)
+        
+        # Add results to the dictionary
+        for url, content in zip(batch_urls, batch_results):
+            if content is not None:
+                results[url] = content
+        
+    return results
 
-
-def crawl_urls(urls: List[str], output_file: Optional[str] = None, verbose: bool = False) -> Dict[str, str]:
+def crawl_urls(urls: List[str], output_file: Optional[str] = None, 
+              verbose: bool = False, batch_size: int = 5) -> Dict[str, str]:
     """
-    Crawl a list of URLs and save their content to a file if specified.
+    Crawl a list of URLs using batched processing and save their content.
     
     Args:
         urls: List of URLs to crawl
         output_file: File path to save the results, or None to skip saving
         verbose: Whether to enable verbose output
+        batch_size: Number of URLs to process concurrently
     
     Returns:
         Dictionary mapping URLs to their content
@@ -338,8 +330,8 @@ def crawl_urls(urls: List[str], output_file: Optional[str] = None, verbose: bool
         print("crawl4ai package not available. Install it with: uv pip install -U crawl4ai nest_asyncio")
         return {}
     
-    # Run the crawler
-    crawled_content = asyncio.run(crawl_multiple_urls(urls, verbose))
+    # Run the crawler with batching
+    crawled_content = asyncio.run(crawl_multiple_urls_batched(urls, batch_size, verbose))
     
     # Report results
     success_count = len(crawled_content)
@@ -369,7 +361,7 @@ def crawl_urls(urls: List[str], output_file: Optional[str] = None, verbose: bool
 
 def search_and_crawl(query: str, searx_url: str = None, num_results: int = 10, 
                      output_file: Optional[str] = None, verbose: bool = False,
-                     settings_path: str = None) -> Tuple[List[str], Dict[str, str]]:
+                     settings_path: str = None, batch_size: int = 5) -> Tuple[List[str], Dict[str, str]]:
     """
     Search using SearXNG and then crawl the resulting URLs.
     
@@ -380,6 +372,7 @@ def search_and_crawl(query: str, searx_url: str = None, num_results: int = 10,
         output_file: File to save crawled content to, or None to skip saving
         verbose: Whether to enable verbose output
         settings_path: Path to the settings.yml file
+        batch_size: Number of URLs to process concurrently
         
     Returns:
         Tuple of (list of URLs, dictionary mapping URLs to their content)
@@ -390,8 +383,8 @@ def search_and_crawl(query: str, searx_url: str = None, num_results: int = 10,
     if not urls:
         return [], {}
     
-    # Crawl the URLs
-    crawled_content = crawl_urls(urls, output_file, verbose)
+    # Crawl the URLs using batched processing
+    crawled_content = crawl_urls(urls, output_file, verbose, batch_size)
     
     return urls, crawled_content
 
@@ -470,16 +463,16 @@ def summarize_content(url: str, content: str, original_question: str = "", model
         return f"Error generating summary: {str(e)}"
 
 
-def summarize_crawled_content(crawled_content: Dict[str, str], 
-                             model: str = "gpt-oss:20b",
-                             original_question: str = "",
-                             clarification_qa: List[Tuple[str, str]] = None,
-                             output_file: Optional[str] = None) -> Dict[str, str]:
+def summarize_content_batch(url_content_pairs: List[Tuple[str, str]], 
+                            model: str = "gpt-oss:20b",
+                            original_question: str = "",
+                            clarification_qa: List[Tuple[str, str]] = None,
+                            output_file: Optional[str] = None) -> Dict[str, str]:
     """
-    Summarize all crawled content and optionally save to a markdown file with references.
+    Summarize a batch of URL content pairs using MapReduce pattern.
     
     Args:
-        crawled_content: Dictionary mapping URLs to their content
+        url_content_pairs: List of (url, content) tuples to summarize
         model: The model to use for summarization
         original_question: The user's original research question
         clarification_qa: List of (question, answer) pairs from clarifications
@@ -489,118 +482,122 @@ def summarize_crawled_content(crawled_content: Dict[str, str],
         Dictionary mapping URLs to their summaries
     """
     if not OLLAMA_AVAILABLE:
-        print("Error: ollama package not available. Install with: uv pip install ollama")
-        return {}
+        return {url: "Error: ollama package not available" for url, _ in url_content_pairs}
     
-    if not crawled_content:
-        print("No content to summarize.")
-        return {}
-    
-    print(f"\nSummarizing content from {len(crawled_content)} URLs...")
-    summaries = {}
-    
-    # Change output file extension to .md if it's .txt
-    if output_file and output_file.endswith('.txt'):
-        output_file = output_file[:-4] + '.md'
-    
-    # First pass: Generate individual summaries with reference IDs
-    urls_list = list(crawled_content.keys())
-    
-    # Use tqdm to show progress
-    for i, url in enumerate(tqdm(urls_list, desc="Summarizing", unit="url")):
-        content = crawled_content[url]
-        # Pass the reference ID (1-based) for citation
-        summary = summarize_content(url, content, original_question, model, i + 1)
-        summaries[url] = summary
-    
-    # Second pass: Generate a consolidated report
-    if output_file and summaries:
-        with open(output_file, "w", encoding="utf-8") as f:
-            # Write the title and question
-            f.write(f"# Research Summary\n\n")
-            
-            if original_question:
-                f.write(f"**Research Question:** {original_question}\n\n")
-            
-            # Add clarifications if available
-            if clarification_qa:
-                f.write("## Clarifications\n\n")
-                for question, answer in clarification_qa:
-                    f.write(f"**Q: {question}**\n\n")
-                    f.write(f"A: {answer}\n\n")
-                f.write("\n")
-            
-            # Write the consolidated summary section
-            f.write("## Summary\n\n")
-            
-            # Generate an integrated summary if we have the capability
+    # MAP: Process each URL content pair in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(url_content_pairs))) as executor:
+        future_to_url = {
+            executor.submit(
+                summarize_content, 
+                url, 
+                content, 
+                original_question, 
+                model, 
+                i+1
+            ): url 
+            for i, (url, content) in enumerate(url_content_pairs)
+        }
+        
+        # COLLECT: Gather results
+        summaries = {}
+        for future in tqdm(concurrent.futures.as_completed(future_to_url), 
+                           total=len(future_to_url),
+                           desc="Summarizing content"):
+            url = future_to_url[future]
             try:
-                if OLLAMA_AVAILABLE and original_question:
-                    # Prepare a condensed version of summaries to fit into context
-                    condensed_summaries = []
-                    for i, (url, summary) in enumerate(summaries.items()):
-                        # Keep summaries brief for the consolidated report
-                        short_summary = summary[:500] + "..." if len(summary) > 500 else summary
-                        condensed_summaries.append(f"Source [{i+1}]: {short_summary}")
-                    
-                    all_summaries_text = "\n\n".join(condensed_summaries)
-                    
-                    # Add clarification context
-                    clarification_context = ""
-                    if clarification_qa:
-                        clarification_context = "User clarifications:\n"
-                        for q, a in clarification_qa:
-                            clarification_context += f"Q: {q}\nA: {a}\n\n"
-                    
-                    system_prompt = """
-                    You are a research assistant creating a consolidated report from multiple sources.
-                    Write a coherent, well-structured summary that:
-                    1. Directly addresses the research question and user clarifications
-                    2. Integrates information from multiple sources using [n] citations
-                    3. Is factual and objective
-                    4. Presents the most relevant information first
-                    5. Is concise but comprehensive (3-4 paragraphs)
-                    6. Uses clear language and formatting appropriate for a research report
-                    """
-                    
-                    user_prompt = f"""
-                    Research Question: {original_question}
-                    
-                    {clarification_context if clarification_context else ""}
-                    Below are summaries from different sources with their reference numbers:
-                    
-                    {all_summaries_text}
-                    
-                    Write a consolidated research report that integrates these sources to address the research question
-                    and incorporates the user's clarifications. Use the citation format [n] to reference the sources.
-                    """
-                    
-                    response = ollama.chat(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                    )
-                    
-                    consolidated_report = response.get("message", {}).get("content", "").strip()
-                    
-                    # Write the consolidated report
-                    f.write(f"{consolidated_report}\n\n")
-                else:
-                    # If no LLM available or no question, just write all summaries
+                summary = future.result()
+                summaries[url] = summary
+            except Exception as e:
+                summaries[url] = f"Error summarizing content: {str(e)}"
+        
+        if output_file and summaries:
+            with open(output_file, "w", encoding="utf-8") as f:
+                # Write the title and question
+                f.write(f"# Research Summary\n\n")
+                
+                if original_question:
+                    f.write(f"**Research Question:** {original_question}\n\n")
+                
+                # Add clarifications if available
+                if clarification_qa:
+                    f.write("## Clarifications\n\n")
+                    for question, answer in clarification_qa:
+                        f.write(f"**Q: {question}**\n\n")
+                        f.write(f"A: {answer}\n\n")
+                    f.write("\n")
+                
+                # Write the consolidated summary section
+                f.write("## Summary\n\n")
+                
+                # Generate an integrated summary if we have the capability
+                try:
+                    if OLLAMA_AVAILABLE and original_question:
+                        # Prepare a condensed version of summaries to fit into context
+                        condensed_summaries = []
+                        for i, (url, summary) in enumerate(summaries.items()):
+                            # Keep summaries brief for the consolidated report
+                            short_summary = summary[:500] + "..." if len(summary) > 500 else summary
+                            condensed_summaries.append(f"Source [{i+1}]: {short_summary}")
+                        
+                        all_summaries_text = "\n\n".join(condensed_summaries)
+                        
+                        # Add clarification context
+                        clarification_context = ""
+                        if clarification_qa:
+                            clarification_context = "User clarifications:\n"
+                            for q, a in clarification_qa:
+                                clarification_context += f"Q: {q}\nA: {a}\n\n"
+                        
+                        system_prompt = """
+                        You are a research assistant creating a consolidated report from multiple sources.
+                        Write a coherent, well-structured summary that:
+                        1. Directly addresses the research question and user clarifications
+                        2. Integrates information from multiple sources using [n] citations
+                        3. Is factual and objective
+                        4. Presents the most relevant information first
+                        5. Is concise but comprehensive (3-4 paragraphs)
+                        6. Uses clear language and formatting appropriate for a research report
+                        """
+                        
+                        user_prompt = f"""
+                        Research Question: {original_question}
+                        
+                        {clarification_context if clarification_context else ""}
+                        Below are summaries from different sources with their reference numbers:
+                        
+                        {all_summaries_text}
+                        
+                        Write a consolidated research report that integrates these sources to address the research question
+                        and incorporates the user's clarifications. Use the citation format [n] to reference the sources.
+                        """
+                        
+                        response = ollama.chat(
+                            model=model,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                        )
+                        
+                        consolidated_report = response.get("message", {}).get("content", "").strip()
+                        
+                        # Write the consolidated report
+                        f.write(f"{consolidated_report}\n\n")
+                    else:
+                        # If no LLM available or no question, just write all summaries
+                        for i, (url, summary) in enumerate(summaries.items()):
+                            f.write(f"{summary}\n\n")
+                except Exception as e:
+                    print(f"Error generating consolidated report: {e}")
+                    # Fallback: write individual summaries
                     for i, (url, summary) in enumerate(summaries.items()):
                         f.write(f"{summary}\n\n")
-            except Exception as e:
-                print(f"Error generating consolidated report: {e}")
-                # Fallback: write individual summaries
-                for i, (url, summary) in enumerate(summaries.items()):
-                    f.write(f"{summary}\n\n")
-            
-            # Write the references section
-            f.write("## References\n\n")
-            for i, url in enumerate(urls_list):
-                f.write(f"[{i+1}] {url}\n\n")
+                
+                # Write the references section
+                f.write("## References\n\n")
+                urls = [url for url, _ in url_content_pairs]
+                for i, url in enumerate(urls):
+                    f.write(f"[{i+1}] {url}\n\n")
         
         print(f"Research report saved to: {output_file}")
     
@@ -652,7 +649,8 @@ def search_crawl_and_summarize(query: str, searx_url: str = None, num_results: i
                               verbose: bool = False,
                               additional_queries: List[str] = None,
                               clarification_qa: List[Tuple[str, str]] = None,
-                              settings_path: str = None) -> Tuple[List[str], Dict[str, str], Dict[str, str]]:
+                              settings_path: str = None,
+                              batch_size: int = 5) -> Tuple[List[str], Dict[str, str], Dict[str, str]]:
     """
     Complete workflow: search, crawl, and summarize content.
     
@@ -687,15 +685,18 @@ def search_crawl_and_summarize(query: str, searx_url: str = None, num_results: i
     if not urls:
         return [], {}, {}
     
-    # Crawl the URLs
-    crawled_content = crawl_urls(urls, crawl_output_file, verbose)
+    # Crawl the URLs with batched processing
+    crawled_content = crawl_urls(urls, crawl_output_file, verbose, batch_size)
     
-    # Summarize - pass the original query and clarifications to align the summary
-    summaries = summarize_crawled_content(
-        crawled_content, 
-        model=model, 
+    # Process summarization in batches using MapReduce pattern
+    url_content_pairs = [(url, content) for url, content in crawled_content.items()]
+    
+    # Use only batch summarization for all processing
+    summaries = summarize_content_batch(
+        url_content_pairs, 
+        model=model,
         original_question=query,
-        clarification_qa=clarification_qa, 
+        clarification_qa=clarification_qa,
         output_file=summary_output_file
     )
     
