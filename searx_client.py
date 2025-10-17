@@ -130,7 +130,7 @@ def detect_categories_for_query(query: str) -> str:
     
     return ','.join(selected_categories)
 
-def search(query: str, searx_url: str = None, num_results: int = 10, settings_path: str = None) -> List[str]:
+def search(query: str, searx_url: str = None, num_results: int = 10, settings_path: str = None, verbose: bool = False) -> List[str]:
     """
     Search using SearXNG and return a list of URLs.
     
@@ -139,6 +139,7 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
         searx_url: The SearXNG instance URL (defaults to Docker container or env var)
         num_results: Maximum number of results to return
         settings_path: Path to the settings.yml file
+        verbose: Whether to enable verbose output
         
     Returns:
         List of URLs from search results
@@ -205,29 +206,32 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
             'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         
-        print(f"Searching SearXNG for: '{query}'")
-        print(f"Using SearXNG instance: {searx_url}")
-        print(f"Using categories: {default_categories}")
+        # Only print search info if verbose
+        if verbose:
+            print(f"Searching for: '{query}'")
+            print(f"Using categories: {default_categories}")
+            
+            # Show debug info when verbose mode is enabled
+            if os.environ.get('SEARXNG_DEBUG') == '1':
+                print(f"Query type analysis: Original categories were {query_specific_categories}")
+                print(f"Category selection was optimized to {default_categories}")
         
-        # Show debug info when verbose mode is enabled
-        if os.environ.get('SEARXNG_DEBUG') == '1':
-            print(f"Query type analysis: Original categories were {query_specific_categories}")
-            print(f"Category selection was optimized to {default_categories}")
-        
-        # Make the request for HTML results - with debug info
-        print(f"Sending request to: {search_url} with params: {params}")
+        # Make the request for HTML results
         try:
             # Increase timeout for SSH tunneling scenarios
             response = requests.get(search_url, params=params, headers=headers, timeout=30)
-            print(f"Response received: HTTP {response.status_code}")
+            if verbose:
+                print(f"Response received: HTTP {response.status_code}")
             response.raise_for_status()
         except requests.exceptions.Timeout as e:
-            print(f"Timeout error: {e}")
-            print("Debugging: The request timed out. This can happen with SSH tunneling.")
-            print("Try using fewer search categories or increasing the timeout further.")
+            if verbose:
+                print(f"Timeout error: {e}")
+                print("The request timed out. This can happen with SSH tunneling.")
+                print("Try using fewer search categories or increasing the timeout.")
             return []
         except Exception as e:
-            print(f"Request error: {e}")
+            if verbose:
+                print(f"Request error: {e}")
             return []
         
         # Parse HTML response using BeautifulSoup
@@ -245,7 +249,8 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
             # One more attempt with more generic selectors
             result_elements = soup.select('article')
         
-        print(f"Found {len(result_elements)} results")
+        if verbose:
+            print(f"Found {len(result_elements)} search results")
         
         # Extract URLs and titles
         urls = []
@@ -264,12 +269,12 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
             
             if url:
                 urls.append(url)
-                print(f"- {title}")
-                print(f"  URL: {url}")
+                if verbose:
+                    print(f"- {title}")
         
-        print(f"\nExtracted {len(urls)} URLs:")
-        for i, url in enumerate(urls, 1):
-            print(f"{i}. {url}")
+        # Only show detailed URL list in verbose mode
+        if verbose and urls:
+            print(f"Extracted {len(urls)} URLs")
             
         return urls
         
@@ -383,30 +388,34 @@ async def crawl_multiple_urls_batched(urls: List[str], batch_size: int = 5, verb
         Dictionary mapping URLs to their content
     """
     if not CRAWL4AI_AVAILABLE:
-        print("crawl4ai package not available. Install it with: uv pip install -U crawl4ai nest_asyncio")
+        if verbose:
+            print("crawl4ai package not available. Install it with: uv pip install -U crawl4ai nest_asyncio")
         return {}
     
     if not urls:
         return {}
     
     results = {}
-    total_batches = (len(urls) + batch_size - 1) // batch_size
+    url_count = len(urls)
     
-    for batch_num in range(total_batches):
-        start_idx = batch_num * batch_size
-        end_idx = min(start_idx + batch_size, len(urls))
-        batch_urls = urls[start_idx:end_idx]
+    # Create a single tqdm progress bar for all URLs
+    with tqdm(total=url_count, desc="Extracting content", disable=not verbose, 
+              unit="url", ncols=80, leave=False) as pbar:
         
-        print(f"Processing batch {batch_num+1}/{total_batches} ({len(batch_urls)} URLs)...")
-        
-        # Process each URL in the current batch in parallel
-        tasks = [crawl_url(url, verbose) for url in batch_urls]
-        batch_results = await asyncio.gather(*tasks)
-        
-        # Add results to the dictionary
-        for url, content in zip(batch_urls, batch_results):
-            if content is not None:
-                results[url] = content
+        # Process in batches for better performance
+        for i in range(0, url_count, batch_size):
+            batch_urls = urls[i:i+batch_size]
+            
+            # Process each URL in the current batch in parallel
+            tasks = [crawl_url(url, False) for url in batch_urls]  # Set verbose=False to avoid individual messages
+            batch_results = await asyncio.gather(*tasks)
+            
+            # Add results to the dictionary
+            for url, content in zip(batch_urls, batch_results):
+                if content is not None:
+                    results[url] = content
+                # Update progress regardless of success
+                pbar.update(1)
         
     return results
 
@@ -425,15 +434,18 @@ def crawl_urls(urls: List[str], output_file: Optional[str] = None,
         Dictionary mapping URLs to their content
     """
     if not CRAWL4AI_AVAILABLE:
-        print("crawl4ai package not available. Install it with: uv pip install -U crawl4ai nest_asyncio")
+        if verbose:
+            print("crawl4ai package not available. Install it with: uv pip install -U crawl4ai nest_asyncio")
         return {}
     
     # Run the crawler with batching
     crawled_content = asyncio.run(crawl_multiple_urls_batched(urls, batch_size, verbose))
     
-    # Report results
-    success_count = len(crawled_content)
-    print(f"\nCrawling complete: {success_count}/{len(urls)} URLs successfully crawled")
+    # Report results only if verbose
+    if verbose:
+        success_count = len(crawled_content)
+        success_rate = (success_count / len(urls)) * 100 if urls else 0
+        print(f"Content extracted: {success_count}/{len(urls)} URLs ({success_rate:.1f}%)")
     
     # Write results to file in JSON format if specified
     if output_file and crawled_content:
@@ -452,7 +464,8 @@ def crawl_urls(urls: List[str], output_file: Optional[str] = None,
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(json_data, f, ensure_ascii=False, indent=2)
         
-        print(f"Results saved to: {output_file} in structured JSON format")
+        if verbose:
+            print(f"Results saved to: {output_file}")
     
     return crawled_content
 
@@ -726,7 +739,7 @@ def search_with_multiple_queries(queries: List[str], searx_url: str = None,
             print(f"Search query {i}/{len(queries)}: '{query}'")
             
         # For each query, the search function will automatically determine appropriate categories
-        urls = search(query, searx_url, num_results_per_query, settings_path)
+        urls = search(query, searx_url, num_results_per_query, settings_path, verbose=verbose)
         
         # Add only new URLs to the list (avoid duplicates)
         for url in urls:
@@ -778,7 +791,7 @@ def search_crawl_and_summarize(query: str, searx_url: str = None, num_results: i
         urls = search_with_multiple_queries(all_queries, searx_url, results_per_query, verbose, settings_path)
     else:
         # Just use the original query
-        urls = search(query, searx_url, num_results, settings_path)
+        urls = search(query, searx_url, num_results, settings_path, verbose=verbose)
     
     if not urls:
         return [], {}, {}
