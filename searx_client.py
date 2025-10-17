@@ -57,6 +57,79 @@ def load_searx_settings(settings_path: str = None) -> Dict[str, Any]:
         return {}
 
 
+def detect_categories_for_query(query: str) -> str:
+    """
+    Determine appropriate search categories based on query content, using a more targeted approach.
+    
+    Args:
+        query: The search query text
+        
+    Returns:
+        Comma-separated string of category names
+    """
+    query_lower = query.lower()
+    
+    query_types = {
+        'news': ['news', 'latest', 'recent', 'update', 'today', 'current events', 'week', 'month', 'year', 'yesterday'],
+        'academic': ['research paper', 'journal', 'academic', 'scholarly', 'publication', 'thesis', 'dissertation', 'doi'],
+        'technical': ['programming', 'code', 'software', 'algorithm', 'framework', 'library', 'developer', 'github'],
+        'visual': ['image', 'picture', 'photo', 'visual', 'screenshot', 'diagram', 'graph'],
+        'video': ['video', 'youtube', 'watch', 'stream', 'tutorial', 'lecture', 'conference'],
+        'health': ['medical', 'disease', 'symptom', 'treatment', 'patient', 'clinical', 'hospital', 'doctor'],
+        'science': ['physics', 'chemistry', 'biology', 'experiment', 'scientific', 'theory', 'mathematical'],
+        'files': ['pdf', 'document', 'download', '.pdf', '.doc', '.txt']
+    }
+
+    selected_categories = {'general'}
+    primary_type = None
+    strongest_match = 0
+    
+    for query_type, type_keywords in query_types.items():
+        match_strength = sum(1 for kw in type_keywords if kw in query_lower)
+        if match_strength > strongest_match:
+            strongest_match = match_strength
+            primary_type = query_type
+    
+    category_mapping = {
+        'news': ['news', 'general', 'web'],
+        'academic': ['academic', 'science', 'papers'], 
+        'technical': ['it', 'general', 'web'],
+        'visual': ['images', 'general'],
+        'video': ['videos', 'general'],
+        'health': ['health', 'medical', 'science'],
+        'science': ['science', 'academic', 'papers'],
+        'files': ['files', 'web', 'general']
+    }
+    
+    # Handle news about specific topics differently
+    if primary_type == 'news':
+        if any(topic in query_lower for topic in ['eu', 'europe', 'european', 'schengen', 'country', 'countries']):
+            # For news about countries/regions, we don't need academic or science categories
+            return 'news,general,web'
+        
+        if any(topic in query_lower for topic in ['tech', 'technology', 'software', 'digital']):
+            return 'news,it,web,general'
+            
+        if any(topic in query_lower for topic in ['health', 'medical', 'disease', 'covid', 'virus']):
+            return 'news,health,medical,web,general'
+    
+    # Add relevant categories based on the primary query type
+    if primary_type and primary_type in category_mapping:
+        for category in category_mapping[primary_type]:
+            selected_categories.add(category)
+    
+    # Special cases that override the general logic
+    if 'research paper' in query_lower or 'academic paper' in query_lower or 'journal article' in query_lower:
+        # Pure academic search should focus on academic sources
+        return 'academic,papers,science,web'
+    
+    # News-specific optimization
+    if 'news' in query_lower or 'recent' in query_lower or 'latest' in query_lower:
+        # News queries should prioritize news sources
+        return 'news,web,general'
+    
+    return ','.join(selected_categories)
+
 def search(query: str, searx_url: str = None, num_results: int = 10, settings_path: str = None) -> List[str]:
     """
     Search using SearXNG and return a list of URLs.
@@ -81,11 +154,12 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
             bind_address = settings['server'].get('bind_address', '127.0.0.1')
             searx_url = f"{server_base}" if server_base.startswith('http') else f"http://{server_base}"
         else:
-            # Otherwise use bind_address and port from settings or default
+            # Otherwise use port from settings or default
             port = settings.get('server', {}).get('port', 8080)
-            bind_address = settings.get('server', {}).get('bind_address', '127.0.0.1')
-            # Use environment variable if set, otherwise construct URL from settings
-            searx_url = os.getenv('SEARXNG_URL', f"http://{bind_address}:{port}")
+            # For client connections, always use localhost instead of bind_address
+            # since 0.0.0.0 in the settings is meant for the server to listen on all interfaces
+            # Use environment variable if set, otherwise construct URL with localhost
+            searx_url = os.getenv('SEARXNG_URL', f"http://localhost:{port}")
     
     try:
         # Clean query by removing control characters
@@ -94,20 +168,26 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
         # SearXNG search endpoint
         search_url = f"{searx_url}/search"
         
-        # Get categories from settings if available
-        default_categories = 'general,science'
-        if settings and 'engines' in settings:
-            # Extract unique categories from engines
-            categories_set = set()
-            for engine in settings['engines']:
-                if 'categories' in engine:
-                    if isinstance(engine['categories'], list):
-                        categories_set.update(engine['categories'])
-                    elif isinstance(engine['categories'], str):
-                        categories_set.add(engine['categories'])
-            
-            if categories_set:
-                default_categories = ','.join(categories_set)
+        # Detect appropriate categories based on query content
+        query_specific_categories = detect_categories_for_query(query)
+        default_categories = query_specific_categories
+        
+        # Use detected categories as they're now more optimized
+        # But limit the number of categories to avoid timeouts and irrelevant results
+        categories_list = query_specific_categories.split(',')
+        
+        # If we have too many categories, prioritize the most relevant ones
+        max_categories = 4  # Limit to a reasonable number of categories
+        if len(categories_list) > max_categories:
+            # Always keep 'general' if it's in the list
+            if 'general' in categories_list:
+                categories_list.remove('general')
+                trimmed_categories = categories_list[:max_categories-1]
+                trimmed_categories.append('general')
+            else:
+                trimmed_categories = categories_list[:max_categories]
+                
+            default_categories = ','.join(trimmed_categories)
         
         # Get safe search setting if available
         safe_search = settings.get('search', {}).get('safe_search', '0')
@@ -115,9 +195,9 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
         # Parameters for the search
         params = {
             'q': query,
-            'categories': default_categories,  # Use categories from settings
-            'safesearch': str(safe_search),   # Use safe search from settings
-            'pageno': '1'  # First page
+            'categories': default_categories,
+            'safesearch': str(safe_search),
+            'pageno': '1'
         }
         
         # Headers to mimic a browser request
@@ -127,10 +207,28 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
         
         print(f"Searching SearXNG for: '{query}'")
         print(f"Using SearXNG instance: {searx_url}")
+        print(f"Using categories: {default_categories}")
         
-        # Make the request for HTML results
-        response = requests.get(search_url, params=params, headers=headers, timeout=10)
-        response.raise_for_status()
+        # Show debug info when verbose mode is enabled
+        if os.environ.get('SEARXNG_DEBUG') == '1':
+            print(f"Query type analysis: Original categories were {query_specific_categories}")
+            print(f"Category selection was optimized to {default_categories}")
+        
+        # Make the request for HTML results - with debug info
+        print(f"Sending request to: {search_url} with params: {params}")
+        try:
+            # Increase timeout for SSH tunneling scenarios
+            response = requests.get(search_url, params=params, headers=headers, timeout=30)
+            print(f"Response received: HTTP {response.status_code}")
+            response.raise_for_status()
+        except requests.exceptions.Timeout as e:
+            print(f"Timeout error: {e}")
+            print("Debugging: The request timed out. This can happen with SSH tunneling.")
+            print("Try using fewer search categories or increasing the timeout further.")
+            return []
+        except Exception as e:
+            print(f"Request error: {e}")
+            return []
         
         # Parse HTML response using BeautifulSoup
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -627,7 +725,7 @@ def search_with_multiple_queries(queries: List[str], searx_url: str = None,
         if verbose:
             print(f"Search query {i}/{len(queries)}: '{query}'")
             
-        # Search for URLs using the current query and settings from YAML
+        # For each query, the search function will automatically determine appropriate categories
         urls = search(query, searx_url, num_results_per_query, settings_path)
         
         # Add only new URLs to the list (avoid duplicates)

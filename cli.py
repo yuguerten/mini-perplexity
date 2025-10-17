@@ -122,7 +122,7 @@ def main() -> None:
         from ollama_client import generate_search_query_from_answer, generate_combined_search_query
         
         searx_url = os.getenv('SEARXNG_URL', 'http://localhost:8080')
-        max_results = 50
+        max_results = 10
         
         # Generate search queries from clarifying answers
         additional_queries = []
@@ -151,6 +151,11 @@ def main() -> None:
         # Perform the search and crawl the results
         crawl_output_file = f"crawled_content_{qid}.txt"
         summary_output_file = f"summaries_{qid}.md"
+        
+        # Check if this appears to be a news-specific search
+        is_news_search = any(word in original_question.lower() for word in ['news', 'recent', 'latest', 'update'])
+        if is_news_search:
+            print("\nOptimizing search for news content...")
         
         print(f"\nSearching using {1 + len(additional_queries)} queries...")
         
