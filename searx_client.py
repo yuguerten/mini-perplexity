@@ -345,16 +345,24 @@ def crawl_urls(urls: List[str], output_file: Optional[str] = None, verbose: bool
     success_count = len(crawled_content)
     print(f"\nCrawling complete: {success_count}/{len(urls)} URLs successfully crawled")
     
-    # Write results to file if specified
+    # Write results to file in JSON format if specified
     if output_file and crawled_content:
-        with open(output_file, "w", encoding="utf-8") as f:
-            for url, content in crawled_content.items():
-                f.write(f"{url}\n")
-                f.write("="*50 + "\n")
-                f.write(content)
-                f.write("\n" + "="*50 + "\n\n")
+        json_data = []
+        for url, content in crawled_content.items():
+            # Split content into lines and filter out empty lines
+            content_lines = [line.strip() for line in content.split('\n') if line.strip()]
+            # Create a structured JSON object for each URL
+            json_entry = {
+                "url": url,
+                "content": content_lines
+            }
+            json_data.append(json_entry)
         
-        print(f"Results saved to: {output_file}")
+        # Write JSON data to file
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(json_data, f, ensure_ascii=False, indent=2)
+        
+        print(f"Results saved to: {output_file} in structured JSON format")
     
     return crawled_content
 
@@ -404,6 +412,11 @@ def summarize_content(url: str, content: str, original_question: str = "", model
     """
     if not OLLAMA_AVAILABLE:
         return "Error: ollama package not available. Install with: uv pip install ollama"
+    
+    # Handle content as either a string or list
+    if isinstance(content, list):
+        # Convert list to string, joining with newlines
+        content = "\n".join(content)
     
     if not content or len(content.strip()) < 50:
         return "No sufficient content to summarize."
@@ -687,3 +700,55 @@ def search_crawl_and_summarize(query: str, searx_url: str = None, num_results: i
     )
     
     return urls, crawled_content, summaries
+
+
+def read_crawled_content(file_path: str) -> List[Dict]:
+    """
+    Read crawled content from a JSON file.
+    
+    Args:
+        file_path: Path to the JSON file with crawled content
+        
+    Returns:
+        List of dictionaries with URL and content fields
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data
+    except FileNotFoundError:
+        print(f"File not found: {file_path}")
+        return []
+    except json.JSONDecodeError:
+        print(f"Invalid JSON in file: {file_path}")
+        # Try to read as old format
+        try:
+            old_format_content = {}
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            sections = content.split('=' * 50)
+            current_url = None
+            
+            for section in sections:
+                section = section.strip()
+                if not section:
+                    continue
+                
+                lines = section.split('\n')
+                if current_url is None:
+                    current_url = lines[0].strip()
+                    continue
+                
+                content_text = '\n'.join(lines)
+                if content_text:
+                    old_format_content[current_url] = content_text
+                    current_url = None
+            
+            return [{"url": url, "content": content.split('\n')} for url, content in old_format_content.items()]
+        except Exception as e:
+            print(f"Error reading file as old format: {e}")
+            return []
+    except Exception as e:
+        print(f"Error reading file: {e}")
+        return []

@@ -8,7 +8,7 @@ from typing import Dict, List
 from uuid import uuid4
 
 from ollama_client import generate_clarifying_questions, generate_next_question
-from searx_client import search, search_from_query_file, crawl_urls, search_and_crawl, summarize_crawled_content, search_crawl_and_summarize
+from searx_client import search, search_from_query_file, crawl_urls, search_and_crawl, summarize_crawled_content, search_crawl_and_summarize, read_crawled_content
 
 MODEL = "gpt-oss:20b"
 
@@ -127,7 +127,7 @@ def main() -> None:
         from ollama_client import generate_search_query_from_answer, generate_combined_search_query
         
         searx_url = os.getenv('SEARXNG_URL', 'http://localhost:8080')
-        max_results = 10  # Default to 10 results
+        max_results = 50
         
         # Generate search queries from clarifying answers
         additional_queries = []
