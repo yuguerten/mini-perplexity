@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import requests
 import re
 import yaml
@@ -56,7 +57,80 @@ def load_searx_settings(settings_path: str = None) -> Dict[str, Any]:
         return {}
 
 
-def search(query: str, searx_url: str = None, num_results: int = 10, settings_path: str = None) -> List[str]:
+def detect_categories_for_query(query: str) -> str:
+    """
+    Determine appropriate search categories based on query content, using a more targeted approach.
+    
+    Args:
+        query: The search query text
+        
+    Returns:
+        Comma-separated string of category names
+    """
+    query_lower = query.lower()
+    
+    query_types = {
+        'news': ['news', 'latest', 'recent', 'update', 'today', 'current events', 'week', 'month', 'year', 'yesterday'],
+        'academic': ['research paper', 'journal', 'academic', 'scholarly', 'publication', 'thesis', 'dissertation', 'doi'],
+        'technical': ['programming', 'code', 'software', 'algorithm', 'framework', 'library', 'developer', 'github'],
+        'visual': ['image', 'picture', 'photo', 'visual', 'screenshot', 'diagram', 'graph'],
+        'video': ['video', 'youtube', 'watch', 'stream', 'tutorial', 'lecture', 'conference'],
+        'health': ['medical', 'disease', 'symptom', 'treatment', 'patient', 'clinical', 'hospital', 'doctor'],
+        'science': ['physics', 'chemistry', 'biology', 'experiment', 'scientific', 'theory', 'mathematical'],
+        'files': ['pdf', 'document', 'download', '.pdf', '.doc', '.txt']
+    }
+
+    selected_categories = {'general'}
+    primary_type = None
+    strongest_match = 0
+    
+    for query_type, type_keywords in query_types.items():
+        match_strength = sum(1 for kw in type_keywords if kw in query_lower)
+        if match_strength > strongest_match:
+            strongest_match = match_strength
+            primary_type = query_type
+    
+    category_mapping = {
+        'news': ['news', 'general', 'web'],
+        'academic': ['academic', 'science', 'papers'], 
+        'technical': ['it', 'general', 'web'],
+        'visual': ['images', 'general'],
+        'video': ['videos', 'general'],
+        'health': ['health', 'medical', 'science'],
+        'science': ['science', 'academic', 'papers'],
+        'files': ['files', 'web', 'general']
+    }
+    
+    # Handle news about specific topics differently
+    if primary_type == 'news':
+        if any(topic in query_lower for topic in ['eu', 'europe', 'european', 'schengen', 'country', 'countries']):
+            # For news about countries/regions, we don't need academic or science categories
+            return 'news,general,web'
+        
+        if any(topic in query_lower for topic in ['tech', 'technology', 'software', 'digital']):
+            return 'news,it,web,general'
+            
+        if any(topic in query_lower for topic in ['health', 'medical', 'disease', 'covid', 'virus']):
+            return 'news,health,medical,web,general'
+    
+    # Add relevant categories based on the primary query type
+    if primary_type and primary_type in category_mapping:
+        for category in category_mapping[primary_type]:
+            selected_categories.add(category)
+    
+    # Special cases that override the general logic
+    if 'research paper' in query_lower or 'academic paper' in query_lower or 'journal article' in query_lower:
+        # Pure academic search should focus on academic sources
+        return 'academic,papers,science,web'
+    
+    # News-specific optimization
+    if 'news' in query_lower or 'recent' in query_lower or 'latest' in query_lower:
+        # News queries should prioritize news sources
+        return 'news,web,general'
+    
+    return ','.join(selected_categories)
+
+def search(query: str, searx_url: str = None, num_results: int = 10, settings_path: str = None, verbose: bool = False) -> List[str]:
     """
     Search using SearXNG and return a list of URLs.
     
@@ -65,6 +139,7 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
         searx_url: The SearXNG instance URL (defaults to Docker container or env var)
         num_results: Maximum number of results to return
         settings_path: Path to the settings.yml file
+        verbose: Whether to enable verbose output
         
     Returns:
         List of URLs from search results
@@ -80,11 +155,12 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
             bind_address = settings['server'].get('bind_address', '127.0.0.1')
             searx_url = f"{server_base}" if server_base.startswith('http') else f"http://{server_base}"
         else:
-            # Otherwise use bind_address and port from settings or default
+            # Otherwise use port from settings or default
             port = settings.get('server', {}).get('port', 8080)
-            bind_address = settings.get('server', {}).get('bind_address', '127.0.0.1')
-            # Use environment variable if set, otherwise construct URL from settings
-            searx_url = os.getenv('SEARXNG_URL', f"http://{bind_address}:{port}")
+            # For client connections, always use localhost instead of bind_address
+            # since 0.0.0.0 in the settings is meant for the server to listen on all interfaces
+            # Use environment variable if set, otherwise construct URL with localhost
+            searx_url = os.getenv('SEARXNG_URL', f"http://localhost:{port}")
     
     try:
         # Clean query by removing control characters
@@ -93,20 +169,26 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
         # SearXNG search endpoint
         search_url = f"{searx_url}/search"
         
-        # Get categories from settings if available
-        default_categories = 'general,science'
-        if settings and 'engines' in settings:
-            # Extract unique categories from engines
-            categories_set = set()
-            for engine in settings['engines']:
-                if 'categories' in engine:
-                    if isinstance(engine['categories'], list):
-                        categories_set.update(engine['categories'])
-                    elif isinstance(engine['categories'], str):
-                        categories_set.add(engine['categories'])
-            
-            if categories_set:
-                default_categories = ','.join(categories_set)
+        # Detect appropriate categories based on query content
+        query_specific_categories = detect_categories_for_query(query)
+        default_categories = query_specific_categories
+        
+        # Use detected categories as they're now more optimized
+        # But limit the number of categories to avoid timeouts and irrelevant results
+        categories_list = query_specific_categories.split(',')
+        
+        # If we have too many categories, prioritize the most relevant ones
+        max_categories = 4  # Limit to a reasonable number of categories
+        if len(categories_list) > max_categories:
+            # Always keep 'general' if it's in the list
+            if 'general' in categories_list:
+                categories_list.remove('general')
+                trimmed_categories = categories_list[:max_categories-1]
+                trimmed_categories.append('general')
+            else:
+                trimmed_categories = categories_list[:max_categories]
+                
+            default_categories = ','.join(trimmed_categories)
         
         # Get safe search setting if available
         safe_search = settings.get('search', {}).get('safe_search', '0')
@@ -114,9 +196,9 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
         # Parameters for the search
         params = {
             'q': query,
-            'categories': default_categories,  # Use categories from settings
-            'safesearch': str(safe_search),   # Use safe search from settings
-            'pageno': '1'  # First page
+            'categories': default_categories,
+            'safesearch': str(safe_search),
+            'pageno': '1'
         }
         
         # Headers to mimic a browser request
@@ -124,12 +206,33 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
             'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         
-        print(f"Searching SearXNG for: '{query}'")
-        print(f"Using SearXNG instance: {searx_url}")
+        # Only print search info if verbose
+        if verbose:
+            print(f"Searching for: '{query}'")
+            print(f"Using categories: {default_categories}")
+            
+            # Show debug info when verbose mode is enabled
+            if os.environ.get('SEARXNG_DEBUG') == '1':
+                print(f"Query type analysis: Original categories were {query_specific_categories}")
+                print(f"Category selection was optimized to {default_categories}")
         
         # Make the request for HTML results
-        response = requests.get(search_url, params=params, headers=headers, timeout=10)
-        response.raise_for_status()
+        try:
+            # Increase timeout for SSH tunneling scenarios
+            response = requests.get(search_url, params=params, headers=headers, timeout=30)
+            if verbose:
+                print(f"Response received: HTTP {response.status_code}")
+            response.raise_for_status()
+        except requests.exceptions.Timeout as e:
+            if verbose:
+                print(f"Timeout error: {e}")
+                print("The request timed out. This can happen with SSH tunneling.")
+                print("Try using fewer search categories or increasing the timeout.")
+            return []
+        except Exception as e:
+            if verbose:
+                print(f"Request error: {e}")
+            return []
         
         # Parse HTML response using BeautifulSoup
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -146,7 +249,8 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
             # One more attempt with more generic selectors
             result_elements = soup.select('article')
         
-        print(f"Found {len(result_elements)} results")
+        if verbose:
+            print(f"Found {len(result_elements)} search results")
         
         # Extract URLs and titles
         urls = []
@@ -165,12 +269,12 @@ def search(query: str, searx_url: str = None, num_results: int = 10, settings_pa
             
             if url:
                 urls.append(url)
-                print(f"- {title}")
-                print(f"  URL: {url}")
+                if verbose:
+                    print(f"- {title}")
         
-        print(f"\nExtracted {len(urls)} URLs:")
-        for i, url in enumerate(urls, 1):
-            print(f"{i}. {url}")
+        # Only show detailed URL list in verbose mode
+        if verbose and urls:
+            print(f"Extracted {len(urls)} URLs")
             
         return urls
         
@@ -223,29 +327,6 @@ def search_from_query_file(query_file_path: str, searx_url: str = None, num_resu
         print(f"Error loading query file: {e}")
         return []
 
-
-def get_latest_query_file() -> Optional[str]:
-    """
-    Find the latest query JSON file in the queries directory.
-    
-    Returns:
-        Path to the latest query file or None if none found
-    """
-    try:
-        queries_dir = os.path.join(os.getcwd(), "queries")
-        if not os.path.exists(queries_dir):
-            return None
-        
-        query_files = [f for f in os.listdir(queries_dir) if f.endswith('.json')]
-        if not query_files:
-            return None
-        
-        latest_file = max(query_files, key=lambda f: os.path.getmtime(os.path.join(queries_dir, f)))
-        return os.path.join(queries_dir, latest_file)
-    except Exception:
-        return None
-
-
 async def crawl_url(url: str, verbose: bool = False) -> Optional[str]:
     """
     Fetch content from a URL using crawl4ai.
@@ -294,74 +375,104 @@ async def crawl_url(url: str, verbose: bool = False) -> Optional[str]:
         return None
 
 
-async def crawl_multiple_urls(urls: List[str], verbose: bool = False) -> Dict[str, str]:
+async def crawl_multiple_urls_batched(urls: List[str], batch_size: int = 5, verbose: bool = False) -> Dict[str, str]:
     """
-    Crawl multiple URLs in parallel and return their content.
+    Crawl multiple URLs in parallel batches and return their content.
     
     Args:
         urls: List of URLs to crawl
+        batch_size: Number of URLs to process concurrently
         verbose: Whether to enable verbose output
         
     Returns:
         Dictionary mapping URLs to their content
     """
     if not CRAWL4AI_AVAILABLE:
-        print("crawl4ai package not available. Install it with: uv pip install -U crawl4ai nest_asyncio")
+        if verbose:
+            print("crawl4ai package not available. Install it with: uv pip install -U crawl4ai nest_asyncio")
         return {}
     
     if not urls:
         return {}
     
-    print(f"Crawling {len(urls)} URLs...")
+    results = {}
+    url_count = len(urls)
     
-    # Process each URL in parallel
-    tasks = [crawl_url(url, verbose) for url in urls]
-    results = await asyncio.gather(*tasks)
-    
-    # Create a dictionary of URL -> content
-    return {url: content for url, content in zip(urls, results) if content is not None}
+    # Create a single tqdm progress bar for all URLs
+    with tqdm(total=url_count, desc="Extracting content", disable=not verbose, 
+              unit="url", ncols=80, leave=False) as pbar:
+        
+        # Process in batches for better performance
+        for i in range(0, url_count, batch_size):
+            batch_urls = urls[i:i+batch_size]
+            
+            # Process each URL in the current batch in parallel
+            tasks = [crawl_url(url, False) for url in batch_urls]  # Set verbose=False to avoid individual messages
+            batch_results = await asyncio.gather(*tasks)
+            
+            # Add results to the dictionary
+            for url, content in zip(batch_urls, batch_results):
+                if content is not None:
+                    results[url] = content
+                # Update progress regardless of success
+                pbar.update(1)
+        
+    return results
 
-
-def crawl_urls(urls: List[str], output_file: Optional[str] = None, verbose: bool = False) -> Dict[str, str]:
+def crawl_urls(urls: List[str], output_file: Optional[str] = None, 
+              verbose: bool = False, batch_size: int = 5) -> Dict[str, str]:
     """
-    Crawl a list of URLs and save their content to a file if specified.
+    Crawl a list of URLs using batched processing and save their content.
     
     Args:
         urls: List of URLs to crawl
         output_file: File path to save the results, or None to skip saving
         verbose: Whether to enable verbose output
+        batch_size: Number of URLs to process concurrently
     
     Returns:
         Dictionary mapping URLs to their content
     """
     if not CRAWL4AI_AVAILABLE:
-        print("crawl4ai package not available. Install it with: uv pip install -U crawl4ai nest_asyncio")
+        if verbose:
+            print("crawl4ai package not available. Install it with: uv pip install -U crawl4ai nest_asyncio")
         return {}
     
-    # Run the crawler
-    crawled_content = asyncio.run(crawl_multiple_urls(urls, verbose))
+    # Run the crawler with batching
+    crawled_content = asyncio.run(crawl_multiple_urls_batched(urls, batch_size, verbose))
     
-    # Report results
-    success_count = len(crawled_content)
-    print(f"\nCrawling complete: {success_count}/{len(urls)} URLs successfully crawled")
+    # Report results only if verbose
+    if verbose:
+        success_count = len(crawled_content)
+        success_rate = (success_count / len(urls)) * 100 if urls else 0
+        print(f"Content extracted: {success_count}/{len(urls)} URLs ({success_rate:.1f}%)")
     
-    # Write results to file if specified
+    # Write results to file in JSON format if specified
     if output_file and crawled_content:
-        with open(output_file, "w", encoding="utf-8") as f:
-            for url, content in crawled_content.items():
-                f.write(f"{url}\n")
-                f.write("="*50 + "\n")
-                f.write(content)
-                f.write("\n" + "="*50 + "\n\n")
+        json_data = []
+        for url, content in crawled_content.items():
+            # Split content into lines and filter out empty lines
+            content_lines = [line.strip() for line in content.split('\n') if line.strip()]
+            # Create a structured JSON object for each URL
+            json_entry = {
+                "url": url,
+                "content": content_lines
+            }
+            json_data.append(json_entry)
         
-        print(f"Results saved to: {output_file}")
+        # Write JSON data to file
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(json_data, f, ensure_ascii=False, indent=2)
+        
+        if verbose:
+            print(f"Results saved to: {output_file}")
     
     return crawled_content
 
 
 def search_and_crawl(query: str, searx_url: str = None, num_results: int = 10, 
                      output_file: Optional[str] = None, verbose: bool = False,
-                     settings_path: str = None) -> Tuple[List[str], Dict[str, str]]:
+                     settings_path: str = None, batch_size: int = 5) -> Tuple[List[str], Dict[str, str]]:
     """
     Search using SearXNG and then crawl the resulting URLs.
     
@@ -372,6 +483,7 @@ def search_and_crawl(query: str, searx_url: str = None, num_results: int = 10,
         output_file: File to save crawled content to, or None to skip saving
         verbose: Whether to enable verbose output
         settings_path: Path to the settings.yml file
+        batch_size: Number of URLs to process concurrently
         
     Returns:
         Tuple of (list of URLs, dictionary mapping URLs to their content)
@@ -382,8 +494,8 @@ def search_and_crawl(query: str, searx_url: str = None, num_results: int = 10,
     if not urls:
         return [], {}
     
-    # Crawl the URLs
-    crawled_content = crawl_urls(urls, output_file, verbose)
+    # Crawl the URLs using batched processing
+    crawled_content = crawl_urls(urls, output_file, verbose, batch_size)
     
     return urls, crawled_content
 
@@ -404,6 +516,11 @@ def summarize_content(url: str, content: str, original_question: str = "", model
     """
     if not OLLAMA_AVAILABLE:
         return "Error: ollama package not available. Install with: uv pip install ollama"
+    
+    # Handle content as either a string or list
+    if isinstance(content, list):
+        # Convert list to string, joining with newlines
+        content = "\n".join(content)
     
     if not content or len(content.strip()) < 50:
         return "No sufficient content to summarize."
@@ -457,16 +574,16 @@ def summarize_content(url: str, content: str, original_question: str = "", model
         return f"Error generating summary: {str(e)}"
 
 
-def summarize_crawled_content(crawled_content: Dict[str, str], 
-                             model: str = "gpt-oss:20b",
-                             original_question: str = "",
-                             clarification_qa: List[Tuple[str, str]] = None,
-                             output_file: Optional[str] = None) -> Dict[str, str]:
+def summarize_content_batch(url_content_pairs: List[Tuple[str, str]], 
+                            model: str = "gpt-oss:20b",
+                            original_question: str = "",
+                            clarification_qa: List[Tuple[str, str]] = None,
+                            output_file: Optional[str] = None) -> Dict[str, str]:
     """
-    Summarize all crawled content and optionally save to a markdown file with references.
+    Summarize a batch of URL content pairs using MapReduce pattern.
     
     Args:
-        crawled_content: Dictionary mapping URLs to their content
+        url_content_pairs: List of (url, content) tuples to summarize
         model: The model to use for summarization
         original_question: The user's original research question
         clarification_qa: List of (question, answer) pairs from clarifications
@@ -476,118 +593,122 @@ def summarize_crawled_content(crawled_content: Dict[str, str],
         Dictionary mapping URLs to their summaries
     """
     if not OLLAMA_AVAILABLE:
-        print("Error: ollama package not available. Install with: uv pip install ollama")
-        return {}
+        return {url: "Error: ollama package not available" for url, _ in url_content_pairs}
     
-    if not crawled_content:
-        print("No content to summarize.")
-        return {}
-    
-    print(f"\nSummarizing content from {len(crawled_content)} URLs...")
-    summaries = {}
-    
-    # Change output file extension to .md if it's .txt
-    if output_file and output_file.endswith('.txt'):
-        output_file = output_file[:-4] + '.md'
-    
-    # First pass: Generate individual summaries with reference IDs
-    urls_list = list(crawled_content.keys())
-    
-    # Use tqdm to show progress
-    for i, url in enumerate(tqdm(urls_list, desc="Summarizing", unit="url")):
-        content = crawled_content[url]
-        # Pass the reference ID (1-based) for citation
-        summary = summarize_content(url, content, original_question, model, i + 1)
-        summaries[url] = summary
-    
-    # Second pass: Generate a consolidated report
-    if output_file and summaries:
-        with open(output_file, "w", encoding="utf-8") as f:
-            # Write the title and question
-            f.write(f"# Research Summary\n\n")
-            
-            if original_question:
-                f.write(f"**Research Question:** {original_question}\n\n")
-            
-            # Add clarifications if available
-            if clarification_qa:
-                f.write("## Clarifications\n\n")
-                for question, answer in clarification_qa:
-                    f.write(f"**Q: {question}**\n\n")
-                    f.write(f"A: {answer}\n\n")
-                f.write("\n")
-            
-            # Write the consolidated summary section
-            f.write("## Summary\n\n")
-            
-            # Generate an integrated summary if we have the capability
+    # MAP: Process each URL content pair in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(url_content_pairs))) as executor:
+        future_to_url = {
+            executor.submit(
+                summarize_content, 
+                url, 
+                content, 
+                original_question, 
+                model, 
+                i+1
+            ): url 
+            for i, (url, content) in enumerate(url_content_pairs)
+        }
+        
+        # COLLECT: Gather results
+        summaries = {}
+        for future in tqdm(concurrent.futures.as_completed(future_to_url), 
+                           total=len(future_to_url),
+                           desc="Summarizing content"):
+            url = future_to_url[future]
             try:
-                if OLLAMA_AVAILABLE and original_question:
-                    # Prepare a condensed version of summaries to fit into context
-                    condensed_summaries = []
-                    for i, (url, summary) in enumerate(summaries.items()):
-                        # Keep summaries brief for the consolidated report
-                        short_summary = summary[:500] + "..." if len(summary) > 500 else summary
-                        condensed_summaries.append(f"Source [{i+1}]: {short_summary}")
-                    
-                    all_summaries_text = "\n\n".join(condensed_summaries)
-                    
-                    # Add clarification context
-                    clarification_context = ""
-                    if clarification_qa:
-                        clarification_context = "User clarifications:\n"
-                        for q, a in clarification_qa:
-                            clarification_context += f"Q: {q}\nA: {a}\n\n"
-                    
-                    system_prompt = """
-                    You are a research assistant creating a consolidated report from multiple sources.
-                    Write a coherent, well-structured summary that:
-                    1. Directly addresses the research question and user clarifications
-                    2. Integrates information from multiple sources using [n] citations
-                    3. Is factual and objective
-                    4. Presents the most relevant information first
-                    5. Is concise but comprehensive (3-4 paragraphs)
-                    6. Uses clear language and formatting appropriate for a research report
-                    """
-                    
-                    user_prompt = f"""
-                    Research Question: {original_question}
-                    
-                    {clarification_context if clarification_context else ""}
-                    Below are summaries from different sources with their reference numbers:
-                    
-                    {all_summaries_text}
-                    
-                    Write a consolidated research report that integrates these sources to address the research question
-                    and incorporates the user's clarifications. Use the citation format [n] to reference the sources.
-                    """
-                    
-                    response = ollama.chat(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                    )
-                    
-                    consolidated_report = response.get("message", {}).get("content", "").strip()
-                    
-                    # Write the consolidated report
-                    f.write(f"{consolidated_report}\n\n")
-                else:
-                    # If no LLM available or no question, just write all summaries
+                summary = future.result()
+                summaries[url] = summary
+            except Exception as e:
+                summaries[url] = f"Error summarizing content: {str(e)}"
+        
+        if output_file and summaries:
+            with open(output_file, "w", encoding="utf-8") as f:
+                # Write the title and question
+                f.write(f"# Research Summary\n\n")
+                
+                if original_question:
+                    f.write(f"**Research Question:** {original_question}\n\n")
+                
+                # Add clarifications if available
+                if clarification_qa:
+                    f.write("## Clarifications\n\n")
+                    for question, answer in clarification_qa:
+                        f.write(f"**Q: {question}**\n\n")
+                        f.write(f"A: {answer}\n\n")
+                    f.write("\n")
+                
+                # Write the consolidated summary section
+                f.write("## Summary\n\n")
+                
+                # Generate an integrated summary if we have the capability
+                try:
+                    if OLLAMA_AVAILABLE and original_question:
+                        # Prepare a condensed version of summaries to fit into context
+                        condensed_summaries = []
+                        for i, (url, summary) in enumerate(summaries.items()):
+                            # Keep summaries brief for the consolidated report
+                            short_summary = summary[:500] + "..." if len(summary) > 500 else summary
+                            condensed_summaries.append(f"Source [{i+1}]: {short_summary}")
+                        
+                        all_summaries_text = "\n\n".join(condensed_summaries)
+                        
+                        # Add clarification context
+                        clarification_context = ""
+                        if clarification_qa:
+                            clarification_context = "User clarifications:\n"
+                            for q, a in clarification_qa:
+                                clarification_context += f"Q: {q}\nA: {a}\n\n"
+                        
+                        system_prompt = """
+                        You are a research assistant creating a consolidated report from multiple sources.
+                        Write a coherent, well-structured summary that:
+                        1. Directly addresses the research question and user clarifications
+                        2. Integrates information from multiple sources using [n] citations
+                        3. Is factual and objective
+                        4. Presents the most relevant information first
+                        5. Is concise but comprehensive (3-4 paragraphs)
+                        6. Uses clear language and formatting appropriate for a research report
+                        """
+                        
+                        user_prompt = f"""
+                        Research Question: {original_question}
+                        
+                        {clarification_context if clarification_context else ""}
+                        Below are summaries from different sources with their reference numbers:
+                        
+                        {all_summaries_text}
+                        
+                        Write a consolidated research report that integrates these sources to address the research question
+                        and incorporates the user's clarifications. Use the citation format [n] to reference the sources.
+                        """
+                        
+                        response = ollama.chat(
+                            model=model,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                        )
+                        
+                        consolidated_report = response.get("message", {}).get("content", "").strip()
+                        
+                        # Write the consolidated report
+                        f.write(f"{consolidated_report}\n\n")
+                    else:
+                        # If no LLM available or no question, just write all summaries
+                        for i, (url, summary) in enumerate(summaries.items()):
+                            f.write(f"{summary}\n\n")
+                except Exception as e:
+                    print(f"Error generating consolidated report: {e}")
+                    # Fallback: write individual summaries
                     for i, (url, summary) in enumerate(summaries.items()):
                         f.write(f"{summary}\n\n")
-            except Exception as e:
-                print(f"Error generating consolidated report: {e}")
-                # Fallback: write individual summaries
-                for i, (url, summary) in enumerate(summaries.items()):
-                    f.write(f"{summary}\n\n")
-            
-            # Write the references section
-            f.write("## References\n\n")
-            for i, url in enumerate(urls_list):
-                f.write(f"[{i+1}] {url}\n\n")
+                
+                # Write the references section
+                f.write("## References\n\n")
+                urls = [url for url, _ in url_content_pairs]
+                for i, url in enumerate(urls):
+                    f.write(f"[{i+1}] {url}\n\n")
         
         print(f"Research report saved to: {output_file}")
     
@@ -617,8 +738,8 @@ def search_with_multiple_queries(queries: List[str], searx_url: str = None,
         if verbose:
             print(f"Search query {i}/{len(queries)}: '{query}'")
             
-        # Search for URLs using the current query and settings from YAML
-        urls = search(query, searx_url, num_results_per_query, settings_path)
+        # For each query, the search function will automatically determine appropriate categories
+        urls = search(query, searx_url, num_results_per_query, settings_path, verbose=verbose)
         
         # Add only new URLs to the list (avoid duplicates)
         for url in urls:
@@ -639,7 +760,8 @@ def search_crawl_and_summarize(query: str, searx_url: str = None, num_results: i
                               verbose: bool = False,
                               additional_queries: List[str] = None,
                               clarification_qa: List[Tuple[str, str]] = None,
-                              settings_path: str = None) -> Tuple[List[str], Dict[str, str], Dict[str, str]]:
+                              settings_path: str = None,
+                              batch_size: int = 5) -> Tuple[List[str], Dict[str, str], Dict[str, str]]:
     """
     Complete workflow: search, crawl, and summarize content.
     
@@ -669,21 +791,76 @@ def search_crawl_and_summarize(query: str, searx_url: str = None, num_results: i
         urls = search_with_multiple_queries(all_queries, searx_url, results_per_query, verbose, settings_path)
     else:
         # Just use the original query
-        urls = search(query, searx_url, num_results, settings_path)
+        urls = search(query, searx_url, num_results, settings_path, verbose=verbose)
     
     if not urls:
         return [], {}, {}
     
-    # Crawl the URLs
-    crawled_content = crawl_urls(urls, crawl_output_file, verbose)
+    # Crawl the URLs with batched processing
+    crawled_content = crawl_urls(urls, crawl_output_file, verbose, batch_size)
     
-    # Summarize - pass the original query and clarifications to align the summary
-    summaries = summarize_crawled_content(
-        crawled_content, 
-        model=model, 
+    # Process summarization in batches using MapReduce pattern
+    url_content_pairs = [(url, content) for url, content in crawled_content.items()]
+    
+    # Use only batch summarization for all processing
+    summaries = summarize_content_batch(
+        url_content_pairs, 
+        model=model,
         original_question=query,
-        clarification_qa=clarification_qa, 
+        clarification_qa=clarification_qa,
         output_file=summary_output_file
     )
     
     return urls, crawled_content, summaries
+
+
+def read_crawled_content(file_path: str) -> List[Dict]:
+    """
+    Read crawled content from a JSON file.
+    
+    Args:
+        file_path: Path to the JSON file with crawled content
+        
+    Returns:
+        List of dictionaries with URL and content fields
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data
+    except FileNotFoundError:
+        print(f"File not found: {file_path}")
+        return []
+    except json.JSONDecodeError:
+        print(f"Invalid JSON in file: {file_path}")
+        # Try to read as old format
+        try:
+            old_format_content = {}
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            sections = content.split('=' * 50)
+            current_url = None
+            
+            for section in sections:
+                section = section.strip()
+                if not section:
+                    continue
+                
+                lines = section.split('\n')
+                if current_url is None:
+                    current_url = lines[0].strip()
+                    continue
+                
+                content_text = '\n'.join(lines)
+                if content_text:
+                    old_format_content[current_url] = content_text
+                    current_url = None
+            
+            return [{"url": url, "content": content.split('\n')} for url, content in old_format_content.items()]
+        except Exception as e:
+            print(f"Error reading file as old format: {e}")
+            return []
+    except Exception as e:
+        print(f"Error reading file: {e}")
+        return []
