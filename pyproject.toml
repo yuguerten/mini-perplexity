@@ -10,6 +10,12 @@ dependencies = [
     "ollama>=0.3.0",
     "requests>=2.31.0",
     "beautifulsoup4>=4.12.0",
+    "mcp[cli]>=1.18.0",
+    "sqlalchemy>=2.0.44",
+    "asyncpg>=0.30.0",
+    "pgvector>=0.4.1",
+    "alembic>=1.17.0",
+    "sentence-transformers>=5.1.1",
 ]
 
 [tool.uv.workspace]

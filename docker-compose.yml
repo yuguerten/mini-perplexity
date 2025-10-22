@@ -38,3 +38,30 @@ services:
     environment:
       - SEARXNG_URL=http://searxng:8080
     restart: unless-stopped
+    
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: mini-perplexity-db
+    environment:
+      POSTGRES_DB: mini_perplexity
+      POSTGRES_USER: mouhcine
+      POSTGRES_PASSWORD: psswd123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mouhcine -d mini_perplexity"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mini-perplexity-network
+
+volumes:
+  postgres_data:
+
+networks:
+  mini-perplexity-network:
+    driver: bridge

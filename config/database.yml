@@ -1,0 +1,15 @@
+database:
+  host: localhost
+  port: 5432
+  name: mini_perplexity
+  user: perplexity_user
+  password: psswd123
+  pool_size: 10
+  max_overflow: 20
+  echo: false
+
+embeddings:
+  model: sentence-transformers/all-MiniLM-L6-v2
+  dimension: 384
+  batch_size: 32
+  cache_dir: ~/.cache/embeddings
