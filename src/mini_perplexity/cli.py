@@ -19,7 +19,7 @@ from rich.markdown import Markdown
 from tqdm.auto import tqdm
 
 from ollama_client import generate_clarifying_questions, generate_next_question
-from searx_client import search, search_from_query_file, crawl_urls, search_and_crawl, search_crawl_and_summarize, read_crawled_content
+from searx_client import search_crawl_and_summarize
 
 # Create a custom theme
 custom_theme = Theme({
