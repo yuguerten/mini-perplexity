@@ -16,17 +16,17 @@ A CLI research assistant powered by local LLMs (via Ollama) and web search (via 
 
 1. **Start SearXNG (search engine):**
    ```bash
-   bash searx-docker.sh start
+   bash scripts/searx-docker.sh start
    ```
 
 2. **Setup crawl4ai (web crawler):**
    ```bash
-   bash setup_crawl4ai.sh
+   bash scripts/setup_crawl4ai.sh
    ```
 
 3. **Run the assistant:**
    ```bash
-   uv run cli.py
+   uv run src/cli.py
    ```
 
 ## Requirements
@@ -38,7 +38,7 @@ A CLI research assistant powered by local LLMs (via Ollama) and web search (via 
 
 ## Usage
 
-After running `uv run cli.py`, the assistant will:
+After running `uv run src/cli.py`, the assistant will:
 1. Ask what you want to research
 2. Ask up to 3 clarifying questions
 3. Search the web using SearXNG
@@ -55,27 +55,31 @@ Results are saved to:
 ### SearXNG Management
 
 ```bash
-bash searx-docker.sh start    # Start SearXNG and Redis
-bash searx-docker.sh stop     # Stop containers
-bash searx-docker.sh restart  # Restart containers
-bash searx-docker.sh logs     # View logs
-bash searx-docker.sh test     # Test connection
+bash scripts/searx-docker.sh start    # Start SearXNG and Redis
+bash scripts/searx-docker.sh stop     # Stop containers
+bash scripts/searx-docker.sh restart  # Restart containers
+bash scripts/searx-docker.sh logs     # View logs
+bash scripts/searx-docker.sh test     # Test connection
 ```
 
 ## Project Structure
 
 ```
 mini-perplexity/
-├── cli.py                    # Main entry point
-├── ollama_client.py          # LLM integration (Ollama)
-├── searx_client.py           # Search & crawling logic
+├── src/
+│   ├── cli.py                # Main entry point
+│   ├── ollama_client.py      # LLM integration (Ollama)
+│   └── searx_client.py       # Search & crawling logic
+├── scripts/
+│   ├── searx-docker.sh       # SearXNG management script
+│   └── setup_crawl4ai.sh     # crawl4ai setup script
+├── assets/
+│   └── arch.png              # Architecture diagram
+├── searxng/settings.yml      # SearXNG configuration
+├── queries/                  # Query history (created at runtime)
 ├── pyproject.toml            # Python dependencies
 ├── uv.lock                   # Locked dependencies
-├── docker-compose.yml        # SearXNG + Redis services
-├── searx-docker.sh           # SearXNG management script
-├── setup_crawl4ai.sh         # crawl4ai setup script
-├── searxng/settings.yml      # SearXNG configuration
-└── queries/                  # Query history (created at runtime)
+└── docker-compose.yml        # SearXNG + Redis services
 ```
 
 ## Dependencies

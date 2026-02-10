@@ -18,4 +18,4 @@ members = [
 ]
 
 [project.scripts]
-mini-perplexity = "cli:main"
+mini-perplexity = "src.cli:main"
