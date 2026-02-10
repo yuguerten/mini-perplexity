@@ -9,7 +9,7 @@ A CLI research assistant powered by local LLMs (via Ollama) and web search (via 
 - **Interactive Research**: Asks clarifying questions to understand your research needs
 - **Web Search**: Uses SearXNG to find relevant sources across the web
 - **Content Extraction**: Crawls and summarizes web pages using crawl4ai
-- **Local LLM**: Uses Ollama with deepseek-r1:1.5b by default
+- **Local LLM**: Uses Ollama with a predefined model by the user
 - **Markdown Reports**: Generates research reports with citations and references
 
 ## Quick Start
