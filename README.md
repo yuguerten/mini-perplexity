@@ -2,6 +2,8 @@
 
 A CLI research assistant powered by local LLMs (via Ollama) and web search (via SearXNG).
 
+![Architecture](assets/arch.png)
+
 ## Features
 
 - **Interactive Research**: Asks clarifying questions to understand your research needs
@@ -87,6 +89,3 @@ See `pyproject.toml` for full list. Key dependencies:
 - `rich` - Terminal UI
 - `tqdm` - Progress bars
 
-## License
-
-MIT
