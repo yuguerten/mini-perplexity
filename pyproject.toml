@@ -1,7 +1,7 @@
 [project]
 name = "mini-perplexity"
 version = "0.1.0"
-description = "Add your description here"
+description = "Academic Research Assistant - AI-powered research tool for students, researchers, and professors"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -10,6 +10,16 @@ dependencies = [
     "ollama>=0.3.0",
     "requests>=2.31.0",
     "beautifulsoup4>=4.12.0",
+    "crawl4ai>=0.4.0",
+    "nest-asyncio>=1.6.0",
+    "docling>=2.0.0",
+    "chromadb>=0.5.0",
+    "weasyprint>=62.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.5.0",
+    "httpx>=0.27.0",
+    "python-multipart>=0.0.9",
+    "aiofiles>=24.0.0",
 ]
 
 [tool.uv.workspace]
@@ -19,3 +29,4 @@ members = [
 
 [project.scripts]
 mini-perplexity = "src.cli:main"
+mini-perplexity-api = "src.api.main:app"
