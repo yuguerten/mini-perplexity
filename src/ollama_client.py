@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-MODEL = "deepseek-r1:1.5b"
+MODEL = "lfm2.5-thinking:latest"
 
 
 def _fallback_clarifying_questions(question: str) -> Dict[str, List[str]]:
@@ -282,4 +282,3 @@ def generate_combined_search_query(original_question: str, qa_pairs: list[tuple[
     print(f"Combined search query generation failed: {e}")
     # Fall back to original question
     return original_question
-

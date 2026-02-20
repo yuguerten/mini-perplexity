@@ -1,12 +1,10 @@
-import asyncio
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 
 from .models import (
     ResearchRequest,
@@ -39,7 +37,9 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    pass
+    research_service = None
+    rag_service = None
+    export_service = None
 
 
 app = FastAPI(

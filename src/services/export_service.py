@@ -2,8 +2,6 @@ from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
 
-from weasyprint import HTML, CSS
-
 
 class ExportService:
     def __init__(self, storage_dir: str = "data"):
@@ -142,6 +140,8 @@ class ExportService:
         summary: Optional[str] = None
     ) -> str:
         """Generate PDF from research results"""
+        from weasyprint import HTML
+
         markdown = self._generate_markdown(query, papers, summary)
         html_content = self._markdown_to_html(markdown)
         

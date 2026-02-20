@@ -11,3 +11,7 @@ wheels/
 queries
 *.txt
 *.md
+*.pdf
+*.sqlite3
+data/chroma/chroma.sqlite3
+data

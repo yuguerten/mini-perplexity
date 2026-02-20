@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 import aiohttp
-import aiofiles
 
 from ..api.models import (
     PaperMetadata,
@@ -22,9 +21,15 @@ class ResearchService:
         self.papers_dir = self.storage_dir / "papers"
         self.queries_dir = self.storage_dir / "queries"
         self.summaries_dir = self.storage_dir / "summaries"
+        self.exports_dir = self.storage_dir / "exports"
+        self.debug_pdf_download = os.getenv("DEBUG_PDF_DOWNLOAD", "false").lower() in {"1", "true", "yes", "on"}
         
-        for d in [self.papers_dir, self.queries_dir, self.summaries_dir]:
+        for d in [self.papers_dir, self.queries_dir, self.summaries_dir, self.exports_dir]:
             d.mkdir(parents=True, exist_ok=True)
+
+    def _debug(self, message: str):
+        if self.debug_pdf_download:
+            print(f"[PDF_DEBUG] {message}")
     
     async def search_academic_papers(
         self, 
@@ -181,17 +186,26 @@ class ResearchService:
                                     for pubmed_id, info in summary_data.get("result", {}).items():
                                         if pubmed_id == "uids":
                                             continue
+
+                                        authors = []
+                                        for author in info.get("authors", []):
+                                            if isinstance(author, dict):
+                                                name = author.get("name")
+                                                if name:
+                                                    authors.append(name)
+                                            elif isinstance(author, str):
+                                                authors.append(author)
                                         
                                         papers.append(PaperMetadata(
                                             paper_id=f"pubmed_{pubmed_id}",
                                             title=info.get("title", "Untitled"),
-                                            authors=info.get("authors", []),
+                                            authors=authors,
                                             abstract=None,
                                             url=f"https://pubmed.ncbi.nlm.nih.gov/{pubmed_id}/",
                                             pdf_url=None,
                                             source="pubmed",
                                             published_date=info.get("pubdate"),
-                                            citations=info.get("pubtype", []),
+                                            citations=None,
                                         ))
         except Exception as e:
             print(f"PubMed search error: {e}")
@@ -201,21 +215,49 @@ class ResearchService:
     async def download_paper(self, paper: PaperMetadata) -> Optional[Path]:
         """Download paper PDF to storage"""
         if not paper.pdf_url:
+            self._debug(
+                f"Skip download (no pdf_url) paper_id={paper.paper_id} source={paper.source} "
+                f"paper_url={paper.url}"
+            )
             return None
         
         pdf_path = self.papers_dir / f"{paper.paper_id}.pdf"
         
         if pdf_path.exists():
+            self._debug(
+                f"Reusing existing PDF paper_id={paper.paper_id} path={pdf_path} pdf_url={paper.pdf_url}"
+            )
             return pdf_path
         
         try:
+            self._debug(
+                f"Downloading paper_id={paper.paper_id} source={paper.source} "
+                f"paper_url={paper.url} pdf_url={paper.pdf_url}"
+            )
             async with aiohttp.ClientSession() as session:
                 async with session.get(paper.pdf_url, timeout=60) as resp:
                     if resp.status == 200:
-                        async with aiofiles.open(pdf_path, "wb") as f:
-                            await f.write(await resp.read())
+                        content_type = resp.headers.get("Content-Type", "")
+                        content = await resp.read()
+                        if "pdf" not in content_type.lower():
+                            self._debug(
+                                f"Unexpected content-type paper_id={paper.paper_id} "
+                                f"status=200 content_type={content_type} bytes={len(content)}"
+                            )
+                        pdf_path.write_bytes(content)
+                        self._debug(
+                            f"Download success paper_id={paper.paper_id} status=200 "
+                            f"bytes={len(content)} saved={pdf_path}"
+                        )
                         return pdf_path
+                    self._debug(
+                        f"Download failed paper_id={paper.paper_id} status={resp.status} "
+                        f"pdf_url={paper.pdf_url}"
+                    )
         except Exception as e:
+            self._debug(
+                f"Download exception paper_id={paper.paper_id} pdf_url={paper.pdf_url} error={e}"
+            )
             print(f"Download error for {paper.paper_id}: {e}")
         
         return None
@@ -266,7 +308,7 @@ Full content (excerpt):
 Generate a concise summary focused on the research query."""
             
             response = ollama.chat(
-                model="deepseek-r1:1.5b",
+                model="lfm2.5-thinking:latest",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -288,6 +330,7 @@ Generate a concise summary focused on the research query."""
         result = {
             "query_id": query_id,
             "query": query,
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "status": ResearchStatus.PROCESSING,
             "papers": [],
             "summary": None,
@@ -301,6 +344,10 @@ Generate a concise summary focused on the research query."""
             paper_contents = []
             
             for paper in papers:
+                self._debug(
+                    f"Pipeline paper paper_id={paper.paper_id} source={paper.source} "
+                    f"paper_url={paper.url} pdf_url={paper.pdf_url or 'None'}"
+                )
                 pdf_path = await self.download_paper(paper)
                 
                 content = await self.extract_content(paper, pdf_path)
@@ -317,10 +364,7 @@ Generate a concise summary focused on the research query."""
                 paper_contents.append(paper_content)
                 
                 result["papers"] = [
-                    {
-                        "metadata": p.model_dump(),
-                        "summary": p.summary
-                    }
+                    p.model_dump()
                     for p in paper_contents
                 ]
                 
@@ -332,9 +376,10 @@ Generate a concise summary focused on the research query."""
                 )
             
             if options.export_pdf:
+                self._cleanup_previous_exports_for_query(query=query, current_query_id=query_id)
                 from .export_service import ExportService
                 export_service = ExportService(self.storage_dir)
-                pdf_path = await export_service.generate_pdf(
+                pdf_path = export_service.generate_pdf(
                     query_id=query_id,
                     query=query,
                     papers=paper_contents,
@@ -350,6 +395,28 @@ Generate a concise summary focused on the research query."""
         
         await self._save_query_state(query_id, result)
         return result
+
+    def _cleanup_previous_exports_for_query(self, query: str, current_query_id: str):
+        """Keep only the newest export for the same query text."""
+        for query_file in self.queries_dir.glob("*.json"):
+            try:
+                data = json.loads(query_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+
+            if data.get("query") != query:
+                continue
+            if data.get("query_id") == current_query_id:
+                continue
+
+            old_pdf = data.get("pdf_path")
+            if old_pdf:
+                old_pdf_path = Path(old_pdf)
+                if old_pdf_path.exists():
+                    try:
+                        old_pdf_path.unlink()
+                    except Exception as e:
+                        print(f"Failed to remove old export {old_pdf_path}: {e}")
     
     async def _generate_combined_summary(
         self, 
@@ -383,7 +450,7 @@ Papers summary:
 Generate a consolidated literature review addressing the research query."""
             
             response = ollama.chat(
-                model="deepseek-r1:1.5b",
+                model="lfm2.5-thinking:latest",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -398,7 +465,14 @@ Generate a consolidated literature review addressing the research query."""
     async def _save_query_state(self, query_id: str, result: Dict[str, Any]):
         """Save query state to disk"""
         query_file = self.queries_dir / f"{query_id}.json"
-        
+        previous_state = None
+        if query_file.exists():
+            try:
+                content = query_file.read_text(encoding="utf-8")
+                previous_state = json.loads(content)
+            except Exception:
+                previous_state = None
+
         state = {
             "query_id": query_id,
             "query": result["query"],
@@ -407,12 +481,11 @@ Generate a consolidated literature review addressing the research query."""
             "summary": result.get("summary"),
             "pdf_path": result.get("pdf_path"),
             "error": result.get("error"),
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": result.get("created_at") or (previous_state or {}).get("created_at") or datetime.now(timezone.utc).isoformat(),
             "completed_at": datetime.now(timezone.utc).isoformat() if result["status"] == ResearchStatus.COMPLETED else None,
         }
         
-        async with aiofiles.open(query_file, "w") as f:
-            await f.write(json.dumps(state, indent=2))
+        query_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
     
     async def get_query_state(self, query_id: str) -> Optional[Dict[str, Any]]:
         """Get query state from disk"""
@@ -421,9 +494,8 @@ Generate a consolidated literature review addressing the research query."""
         if not query_file.exists():
             return None
         
-        async with aiofiles.open(query_file, "r") as f:
-            content = await f.read()
-            return json.loads(content)
+        content = query_file.read_text(encoding="utf-8")
+        return json.loads(content)
     
     async def list_queries(self) -> List[Dict[str, Any]]:
         """List all queries"""
@@ -431,17 +503,16 @@ Generate a consolidated literature review addressing the research query."""
         
         for query_file in self.queries_dir.glob("*.json"):
             try:
-                async with aiofiles.open(query_file, "r") as f:
-                    content = await f.read()
-                    data = json.loads(content)
-                    queries.append({
-                        "query_id": data.get("query_id"),
-                        "query": data.get("query"),
-                        "status": data.get("status"),
-                        "paper_count": len(data.get("papers", [])),
-                        "created_at": data.get("created_at"),
-                        "completed_at": data.get("completed_at"),
-                    })
+                content = query_file.read_text(encoding="utf-8")
+                data = json.loads(content)
+                queries.append({
+                    "query_id": data.get("query_id"),
+                    "query": data.get("query"),
+                    "status": data.get("status"),
+                    "paper_count": len(data.get("papers", [])),
+                    "created_at": data.get("created_at"),
+                    "completed_at": data.get("completed_at"),
+                })
             except Exception as e:
                 print(f"Error reading {query_file}: {e}")
         
