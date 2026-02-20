@@ -59,7 +59,7 @@ flowchart TD
  M --> Q
  O --> Q
  P --> Q
- Q --> R[GET /research/{id} returns result]
+ Q --> R["GET /research/{id} returns result"]
 ```
 
 ### CLI Web Pipeline
