@@ -167,6 +167,30 @@ class ExportService:
                 equations.append({"paper_title": title, "equation": eq})
         return {"figures": figures, "tables": tables, "equations": equations}
 
+    def _build_reference_text(self, paper: Any) -> str:
+        metadata = paper.metadata
+        authors = metadata.authors or []
+        if len(authors) > 4:
+            author_text = ", ".join(authors[:4]) + ", et al."
+        else:
+            author_text = ", ".join(authors) if authors else "Unknown authors"
+
+        year = ""
+        if metadata.published_date:
+            year = self._safe_text(metadata.published_date)[:4]
+
+        title = self._safe_text(metadata.title or "Untitled")
+        source = self._safe_text(metadata.source or "Unknown source")
+        url = self._safe_text(metadata.url or "")
+
+        parts = [author_text, f'"{title}"']
+        if year:
+            parts.append(f"({year})")
+        parts.append(source)
+        if url:
+            parts.append(url)
+        return ". ".join([p for p in parts if p])
+
     def _inline_to_latex(self, text: str) -> str:
         from pylatex.utils import escape_latex
 
@@ -389,6 +413,14 @@ class ExportService:
                     with doc.create(Subsection(f"Equation {i}")):
                         doc.append(NoEscape(r"\[" + self._safe_text(eq.get("equation", "")) + r"\]"))
                         doc.append(NoEscape(r"\par\noindent\textbf{Source:} " + escape_latex(self._safe_text(eq.get("paper_title", "Unknown")))))
+
+        if papers:
+            doc.append(NoEscape(r"\section*{References}"))
+            doc.append(NoEscape(r"\begin{enumerate}"))
+            for paper in papers:
+                ref_text = self._build_reference_text(paper)
+                doc.append(NoEscape(r"\item " + self._inline_to_latex(ref_text)))
+            doc.append(NoEscape(r"\end{enumerate}"))
 
         tex_base = pdf_path.with_suffix("")
         doc.generate_tex(str(tex_base))
