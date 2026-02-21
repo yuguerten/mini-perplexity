@@ -32,7 +32,14 @@ class ResearchService:
         self.keyword_min_hits = int(os.getenv("KEYWORD_MIN_HITS", "1"))
         self.docling_force_cpu = os.getenv("DOCLING_FORCE_CPU", "true").lower() in {"1", "true", "yes", "on"}
         self.docling_page_log = os.getenv("DOCLING_PAGE_LOG", "true").lower() in {"1", "true", "yes", "on"}
-        
+
+    def _normalize_text(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return str(value).encode("utf-8", errors="replace").decode("utf-8")
+
         for d in [self.papers_dir, self.queries_dir, self.summaries_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
@@ -548,7 +555,7 @@ class ResearchService:
                 except Exception:
                     self.docling_page_log = False
                     result = converter.convert(str(pdf_path))
-                    return result.document.export_to_markdown()
+                    return self._normalize_text(result.document.export_to_markdown())
 
                 reader = PdfReader(str(pdf_path))
                 total_pages = len(reader.pages)
@@ -566,7 +573,7 @@ class ResearchService:
                             tmp_path = tmp.name
                             writer.write(tmp)
                         result = converter.convert(tmp_path)
-                        markdown_parts.append(result.document.export_to_markdown())
+                        markdown_parts.append(self._normalize_text(result.document.export_to_markdown()))
                     finally:
                         if tmp_path:
                             try:
@@ -577,11 +584,7 @@ class ResearchService:
 
             result = converter.convert(str(pdf_path))
             markdown_text = result.document.export_to_markdown()
-            if isinstance(markdown_text, bytes):
-                markdown_text = markdown_text.decode("utf-8", errors="replace")
-            else:
-                markdown_text = str(markdown_text).encode("utf-8", errors="replace").decode("utf-8")
-            return markdown_text
+            return self._normalize_text(markdown_text)
         except Exception as e:
             print(f"Docling extraction error for {paper.paper_id}: {e}")
             return paper.abstract or ""
@@ -664,7 +667,7 @@ Generate a concise summary focused on the research query."""
                 
                 paper_content = PaperContent(
                     metadata=paper,
-                    full_text=content if content else None,
+                    full_text=self._normalize_text(content) if content else None,
                     summary=summary,
                 )
                 paper_contents.append(paper_content)
