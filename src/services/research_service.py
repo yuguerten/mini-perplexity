@@ -29,6 +29,7 @@ class ResearchService:
         self.keyword_model = os.getenv("KEYWORD_MODEL", "gpt-oss:20b")
         self.embedding_max_chars = int(os.getenv("EMBEDDING_MAX_CHARS", "2000"))
         self.keyword_min_hits = int(os.getenv("KEYWORD_MIN_HITS", "1"))
+        self.docling_force_cpu = os.getenv("DOCLING_FORCE_CPU", "true").lower() in {"1", "true", "yes", "on"}
         
         for d in [self.papers_dir, self.queries_dir, self.summaries_dir]:
             d.mkdir(parents=True, exist_ok=True)
@@ -533,6 +534,9 @@ class ResearchService:
             return paper.abstract or ""
         
         try:
+            if self.docling_force_cpu:
+                os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+                os.environ.setdefault("ORT_DISABLE_GPU", "1")
             from docling.document_converter import DocumentConverter
             
             converter = DocumentConverter()

@@ -263,6 +263,7 @@ class ExportService:
                         doc.append(NoEscape(r"\par\noindent\textbf{Source:} " + escape_latex(eq.get("paper_title", "Unknown"))))
 
         doc.generate_pdf(str(pdf_path.with_suffix("")), clean_tex=False)
+        print(f"[EXPORT] PDF generated at {pdf_path}")
         return str(pdf_path)
     
     def get_pdf_path(self, query_id: str) -> Optional[str]:
