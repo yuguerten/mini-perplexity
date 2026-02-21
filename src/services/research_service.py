@@ -576,7 +576,12 @@ class ResearchService:
                 return "\n\n".join(markdown_parts)
 
             result = converter.convert(str(pdf_path))
-            return result.document.export_to_markdown()
+            markdown_text = result.document.export_to_markdown()
+            if isinstance(markdown_text, bytes):
+                markdown_text = markdown_text.decode("utf-8", errors="replace")
+            else:
+                markdown_text = str(markdown_text).encode("utf-8", errors="replace").decode("utf-8")
+            return markdown_text
         except Exception as e:
             print(f"Docling extraction error for {paper.paper_id}: {e}")
             return paper.abstract or ""

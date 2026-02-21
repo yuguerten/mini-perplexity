@@ -70,6 +70,13 @@ class ExportService:
         
         return "\n".join(md)
 
+    def _safe_text(self, value: Optional[str]) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return str(value).encode("utf-8", errors="replace").decode("utf-8")
+
     def _extract_figures(self, markdown: str) -> List[Dict[str, str]]:
         figures = []
         for match in re.finditer(r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)]+)\)", markdown or ""):
@@ -217,12 +224,12 @@ class ExportService:
         doc.preamble.append(Command("date", NoEscape(r"\today")))
         doc.append(NoEscape(r"\maketitle"))
 
-        doc.append(NoEscape(r"\noindent\textbf{Query:} " + escape_latex(query)))
-        doc.append(NoEscape(r"\par\textbf{Date:} " + escape_latex(datetime.now().strftime("%Y-%m-%d %H:%M"))))
+        doc.append(NoEscape(r"\noindent\textbf{Query:} " + escape_latex(self._safe_text(query))))
+        doc.append(NoEscape(r"\par\textbf{Date:} " + escape_latex(self._safe_text(datetime.now().strftime("%Y-%m-%d %H:%M")))))
 
         if summary:
             with doc.create(Section("Summary")):
-                doc.append(escape_latex(summary))
+                doc.append(escape_latex(self._safe_text(summary)))
 
         if artifacts["figures"]:
             with doc.create(Section("Figures")):
@@ -233,9 +240,9 @@ class ExportService:
                             if fig_path and Path(fig_path).exists():
                                 fig_env.add_image(fig_path, width=NoEscape(r"0.9\textwidth"))
                             caption = f"{fig.get('alt', 'Figure')} (Source: {fig.get('paper_title', 'Unknown')})"
-                            fig_env.add_caption(escape_latex(caption))
+                            fig_env.add_caption(escape_latex(self._safe_text(caption)))
                         if fig.get("url"):
-                            doc.append(NoEscape(r"\par\noindent\textbf{Source:} " + escape_latex(fig["url"])))
+                            doc.append(NoEscape(r"\par\noindent\textbf{Source:} " + escape_latex(self._safe_text(fig["url"])))))
 
         if artifacts["tables"]:
             with doc.create(Section("Tables")):
@@ -246,12 +253,12 @@ class ExportService:
                     cols = len(rows[0])
                     col_spec = "|".join(["l"] * cols)
                     with doc.create(Subsection(f"Table {i}")):
-                        doc.append(NoEscape(r"\noindent\textbf{Source:} " + escape_latex(tbl.get("paper_title", "Unknown")) + r"\par"))
+                        doc.append(NoEscape(r"\noindent\textbf{Source:} " + escape_latex(self._safe_text(tbl.get("paper_title", "Unknown"))) + r"\par"))
                         with doc.create(Tabular("|" + col_spec + "|")) as table:
                             table.add_hline()
                             for r, row in enumerate(rows):
                                 row = row + [""] * max(0, cols - len(row))
-                                table.add_row([escape_latex(c) for c in row[:cols]])
+                                table.add_row([escape_latex(self._safe_text(c)) for c in row[:cols]])
                                 if r == 0:
                                     table.add_hline()
                             table.add_hline()
@@ -260,8 +267,8 @@ class ExportService:
             with doc.create(Section("Equations")):
                 for i, eq in enumerate(artifacts["equations"], 1):
                     with doc.create(Subsection(f"Equation {i}")):
-                        doc.append(NoEscape(r"\[" + eq.get("equation", "") + r"\]"))
-                        doc.append(NoEscape(r"\par\noindent\textbf{Source:} " + escape_latex(eq.get("paper_title", "Unknown"))))
+                        doc.append(NoEscape(r"\[" + self._safe_text(eq.get("equation", "")) + r"\]"))
+                        doc.append(NoEscape(r"\par\noindent\textbf{Source:} " + escape_latex(self._safe_text(eq.get("paper_title", "Unknown")))))
 
         doc.generate_pdf(str(pdf_path.with_suffix("")), clean_tex=False)
         print(f"[EXPORT] end query_id={query_id} path={pdf_path}")
