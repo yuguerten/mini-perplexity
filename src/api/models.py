@@ -33,6 +33,7 @@ class PaperMetadata(BaseModel):
     source: str  # semantic_scholar, arxiv, pubmed, core
     published_date: Optional[str] = None
     citations: Optional[int] = None
+    doi: Optional[str] = None
 
 
 class PaperContent(BaseModel):

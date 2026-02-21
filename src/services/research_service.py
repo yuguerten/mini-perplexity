@@ -27,6 +27,7 @@ class ResearchService:
         self.debug_query_expansion = os.getenv("DEBUG_QUERY_EXPANSION", "false").lower() in {"1", "true", "yes", "on"}
         self.embedding_model = os.getenv("EMBEDDING_MODEL", "embeddinggemma")
         self.keyword_model = os.getenv("KEYWORD_MODEL", "lfm2.5-thinking:latest")
+        self.keyword_min_hits = int(os.getenv("KEYWORD_MIN_HITS", "1"))
         
         for d in [self.papers_dir, self.queries_dir, self.summaries_dir]:
             d.mkdir(parents=True, exist_ok=True)
@@ -255,6 +256,8 @@ class ResearchService:
         if not papers:
             return []
 
+        await self._enrich_arxiv_citations(papers)
+
         keywords = await self._extract_keywords(query)
         if keywords:
             self._debug_query(f"keywords={keywords}")
@@ -270,8 +273,11 @@ class ResearchService:
             scored.append((paper, score, hits))
 
         if keywords:
-            primary = [s for s in scored if s[2] > 0]
-            secondary = [s for s in scored if s[2] == 0]
+            primary = [s for s in scored if s[2] >= self.keyword_min_hits]
+            secondary = [s for s in scored if s[2] < self.keyword_min_hits]
+            if not primary:
+                primary = scored
+                secondary = []
             primary.sort(key=lambda x: x[1], reverse=True)
             secondary.sort(key=lambda x: x[1], reverse=True)
             ordered = primary + secondary
@@ -279,6 +285,7 @@ class ResearchService:
             ordered = sorted(scored, key=lambda x: x[1], reverse=True)
 
         ranked = [p for p, _, _ in ordered]
+
         self._debug_query(
             f"raw_total={len(all_papers)} deduped={len(ranked)} selected={min(max_papers, len(ranked))}"
         )
@@ -352,6 +359,10 @@ class ResearchService:
                             paper_id = entry.find("atom:id", ns).text.split("/")[-1]
                             title = entry.find("atom:title", ns).text.replace("\n", " ")
                             summary = entry.find("atom:summary", ns).text.replace("\n", " ")
+                            doi = None
+                            doi_elem = entry.find("{http://arxiv.org/schemas/atom}doi")
+                            if doi_elem is not None and doi_elem.text:
+                                doi = doi_elem.text.strip()
                             
                             authors = []
                             for author in entry.findall("atom:author", ns):
@@ -374,6 +385,7 @@ class ResearchService:
                                 source="arxiv",
                                 published_date=entry.find("atom:published", ns).text[:10] if entry.find("atom:published", ns) is not None else None,
                                 citations=None,
+                                doi=doi,
                             ))
         except Exception as e:
             print(f"arXiv search error: {e}")
@@ -442,6 +454,55 @@ class ResearchService:
             print(f"PubMed search error: {e}")
         
         return papers
+
+    def _normalize_arxiv_id(self, arxiv_id: str) -> str:
+        return re.sub(r"v\d+$", "", (arxiv_id or "").strip())
+
+    async def _fetch_semantic_scholar_citation(
+        self, session: aiohttp.ClientSession, paper: PaperMetadata
+    ) -> Optional[int]:
+        if paper.citations is not None:
+            return paper.citations
+
+        paper_id = None
+        if paper.doi:
+            paper_id = f"DOI:{paper.doi}"
+        elif paper.paper_id and paper.paper_id.startswith("arxiv_"):
+            raw_id = paper.paper_id.split("arxiv_", 1)[1]
+            paper_id = f"ARXIV:{self._normalize_arxiv_id(raw_id)}"
+        else:
+            return None
+
+        url = f"https://api.semanticscholar.org/graph/v1/paper/{paper_id}"
+        params = {"fields": "citationCount"}
+        try:
+            async with session.get(url, params=params, timeout=30) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+        except Exception:
+            return None
+
+        count = data.get("citationCount")
+        if isinstance(count, int):
+            return count
+        return None
+
+    async def _enrich_arxiv_citations(self, papers: List[PaperMetadata]) -> None:
+        arxiv_papers = [p for p in papers if p.source == "arxiv"]
+        if not arxiv_papers:
+            return
+
+        sem = asyncio.Semaphore(5)
+
+        async def enrich_one(paper: PaperMetadata):
+            async with sem:
+                citation = await self._fetch_semantic_scholar_citation(session, paper)
+                if citation is not None:
+                    paper.citations = citation
+
+        async with aiohttp.ClientSession() as session:
+            await asyncio.gather(*(enrich_one(p) for p in arxiv_papers))
     
     async def download_paper(self, paper: PaperMetadata) -> Optional[Path]:
         """Download paper PDF to storage"""
