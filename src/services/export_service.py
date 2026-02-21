@@ -3,6 +3,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import re
 import subprocess
+import unicodedata
 
 
 class ExportService:
@@ -75,8 +76,22 @@ class ExportService:
         if value is None:
             return ""
         if isinstance(value, bytes):
-            return value.decode("utf-8", errors="replace")
-        return str(value).encode("utf-8", errors="replace").decode("utf-8")
+            text = value.decode("utf-8", errors="replace")
+        else:
+            text = str(value).encode("utf-8", errors="replace").decode("utf-8")
+
+        # Normalize Unicode and replace spacing/control chars that break pdflatex.
+        text = unicodedata.normalize("NFKC", text)
+        text = text.translate({
+            0x00A0: " ",  # non-breaking space
+            0x202F: " ",  # narrow non-breaking space
+            0x2007: " ",  # figure space
+            0x2009: " ",  # thin space
+            0x200A: " ",  # hair space
+            0x2060: "",   # word joiner
+            0xFEFF: "",   # zero-width no-break space
+        })
+        return text
 
     def _extract_figures(self, markdown: str) -> List[Dict[str, str]]:
         figures = []
