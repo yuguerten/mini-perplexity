@@ -211,7 +211,7 @@ class ExportService:
         pdf_path = self.exports_dir / f"{query_id}.pdf"
 
         print(f"[EXPORT] start query_id={query_id}")
-        doc = Document()
+        doc = Document(page_numbers=False)
         doc.preamble.append(Command("title", "Research Report"))
         doc.preamble.append(Command("author", "Mini-Perplexity"))
         doc.preamble.append(Command("date", NoEscape(r"\today")))
