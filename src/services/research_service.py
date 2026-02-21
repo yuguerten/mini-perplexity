@@ -32,6 +32,7 @@ class ResearchService:
         self.keyword_min_hits = int(os.getenv("KEYWORD_MIN_HITS", "1"))
         self.docling_force_cpu = os.getenv("DOCLING_FORCE_CPU", "true").lower() in {"1", "true", "yes", "on"}
         self.docling_page_log = os.getenv("DOCLING_PAGE_LOG", "true").lower() in {"1", "true", "yes", "on"}
+        self.docling_max_pages = int(os.getenv("DOCLING_MAX_PAGES", "4"))
 
     def _normalize_text(self, value: Any) -> str:
         if value is None:
@@ -561,10 +562,13 @@ class ResearchService:
                 total_pages = len(reader.pages)
                 if total_pages == 0:
                     return paper.abstract or ""
+                pages_to_process = total_pages
+                if self.docling_max_pages > 0:
+                    pages_to_process = min(total_pages, self.docling_max_pages)
 
                 markdown_parts = []
-                for i in range(total_pages):
-                    print(f"[DOC] {paper.paper_id} page {i + 1}/{total_pages}")
+                for i in range(pages_to_process):
+                    print(f"[DOC] {paper.paper_id} page {i + 1}/{pages_to_process} (source_total={total_pages})")
                     writer = PdfWriter()
                     writer.add_page(reader.pages[i])
                     tmp_path = None
