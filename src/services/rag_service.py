@@ -95,7 +95,7 @@ class RAGService:
             embeddings = []
             for text in texts:
                 response = ollama.embeddings(
-                    model="nomic-embed-text",
+                    model="embeddinggemma",
                     prompt=text[:8000]
                 )
                 embeddings.append(response.get("embedding", []))
