@@ -3,6 +3,7 @@ import json
 import os
 import re
 import uuid
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -24,6 +25,8 @@ class ResearchService:
         self.summaries_dir = self.storage_dir / "summaries"
         self.debug_citations = os.getenv("DEBUG_CITATIONS", "false").lower() in {"1", "true", "yes", "on"}
         self.debug_query_expansion = os.getenv("DEBUG_QUERY_EXPANSION", "false").lower() in {"1", "true", "yes", "on"}
+        self.embedding_model = os.getenv("EMBEDDING_MODEL", "embeddinggemma")
+        self.keyword_model = os.getenv("KEYWORD_MODEL", "lfm2.5-thinking:latest")
         
         for d in [self.papers_dir, self.queries_dir, self.summaries_dir]:
             d.mkdir(parents=True, exist_ok=True)
@@ -111,14 +114,102 @@ class ResearchService:
     def _tokenize(self, text: str) -> set[str]:
         return set(re.findall(r"[a-z0-9]{3,}", (text or "").lower()))
 
-    def _relevance_score(self, paper: PaperMetadata, original_query: str) -> float:
-        query_tokens = self._tokenize(original_query)
-        title_tokens = self._tokenize(paper.title or "")
-        abstract_tokens = self._tokenize(paper.abstract or "")
-        overlap_score = (len(query_tokens & title_tokens) * 3.0) + (len(query_tokens & abstract_tokens) * 1.5)
-        citation_score = min(float(paper.citations or 0), 500.0) / 25.0
-        pdf_bonus = 1.0 if paper.pdf_url else 0.0
-        return overlap_score + citation_score + pdf_bonus
+    def _paper_text(self, paper: PaperMetadata) -> str:
+        title = (paper.title or "").strip()
+        abstract = (paper.abstract or "").strip()
+        if abstract:
+            return f"{title}\n{abstract}"
+        return title
+
+    def _cosine_sim(self, a: List[float], b: List[float]) -> float:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = math.sqrt(sum(x * x for x in a))
+        norm_b = math.sqrt(sum(y * y for y in b))
+        if norm_a == 0.0 or norm_b == 0.0:
+            return 0.0
+        return dot / (norm_a * norm_b)
+
+    def _get_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings using Ollama."""
+        try:
+            import ollama
+            embeddings: List[List[float]] = []
+            for text in texts:
+                response = ollama.embeddings(
+                    model=self.embedding_model,
+                    prompt=text[:8000],
+                )
+                embeddings.append(response.get("embedding", []))
+            return embeddings
+        except Exception as e:
+            print(f"Embedding error: {e}")
+            return [[0.0] * 768 for _ in texts]
+
+    async def _extract_keywords(self, query: str) -> List[str]:
+        """Extract 5-8 key terms/phrases to guide relevance filtering."""
+        base_query = query.strip()
+        if not base_query:
+            return []
+        try:
+            import ollama
+            system_prompt = (
+                "Extract 5-8 key terms or short phrases from the user query. "
+                "Focus on the core topic and technical terms. "
+                'Return valid JSON only: {"keywords":["k1","k2"]}'
+            )
+            user_prompt = f"Query: {base_query}"
+            response = ollama.chat(
+                model=self.keyword_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            content = response.get("message", {}).get("content", "").strip()
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.endswith("```"):
+                content = content[:-3]
+            parsed = json.loads(content.strip())
+            keywords = []
+            for k in parsed.get("keywords", []):
+                k = str(k).strip()
+                if k and k.lower() not in {x.lower() for x in keywords}:
+                    keywords.append(k)
+            return keywords[:8]
+        except Exception as e:
+            self._debug_query(f"Keyword extraction failed: {type(e).__name__}: {e!r}")
+
+        stopwords = {
+            "the", "and", "for", "with", "from", "that", "this", "those", "these",
+            "into", "over", "under", "between", "within", "across", "about", "paper",
+            "research", "study", "analysis", "approach", "method", "methods", "model",
+            "models", "architecture", "system", "systems",
+        }
+        tokens = [t for t in self._tokenize(base_query) if t not in stopwords]
+        return tokens[:8]
+
+    def _keyword_hits(self, keywords: List[str], text: str) -> int:
+        if not keywords:
+            return 0
+        text_l = text.lower()
+        return sum(1 for k in keywords if k.lower() in text_l)
+
+    def _score_paper(
+        self,
+        paper: PaperMetadata,
+        query_embedding: List[float],
+        paper_embedding: List[float],
+        keywords: List[str],
+    ) -> float:
+        sim = self._cosine_sim(query_embedding, paper_embedding)
+        hits = self._keyword_hits(keywords, self._paper_text(paper))
+        keyword_boost = min(hits, 3) * 0.8
+        citation_score = math.log1p(float(paper.citations or 0)) * 0.2
+        pdf_bonus = 0.3 if paper.pdf_url else 0.0
+        return (sim * 10.0) + keyword_boost + citation_score + pdf_bonus
     
     async def search_academic_papers(
         self, 
@@ -160,11 +251,34 @@ class ResearchService:
                 if current_score > existing_score:
                     deduped[key] = paper
 
-        ranked = sorted(
-            deduped.values(),
-            key=lambda p: self._relevance_score(p, query),
-            reverse=True,
-        )
+        papers = list(deduped.values())
+        if not papers:
+            return []
+
+        keywords = await self._extract_keywords(query)
+        if keywords:
+            self._debug_query(f"keywords={keywords}")
+
+        query_embedding = self._get_embeddings([query])[0]
+        paper_texts = [self._paper_text(p) for p in papers]
+        paper_embeddings = self._get_embeddings(paper_texts)
+
+        scored = []
+        for paper, emb in zip(papers, paper_embeddings):
+            score = self._score_paper(paper, query_embedding, emb, keywords)
+            hits = self._keyword_hits(keywords, self._paper_text(paper)) if keywords else 0
+            scored.append((paper, score, hits))
+
+        if keywords:
+            primary = [s for s in scored if s[2] > 0]
+            secondary = [s for s in scored if s[2] == 0]
+            primary.sort(key=lambda x: x[1], reverse=True)
+            secondary.sort(key=lambda x: x[1], reverse=True)
+            ordered = primary + secondary
+        else:
+            ordered = sorted(scored, key=lambda x: x[1], reverse=True)
+
+        ranked = [p for p, _, _ in ordered]
         self._debug_query(
             f"raw_total={len(all_papers)} deduped={len(ranked)} selected={min(max_papers, len(ranked))}"
         )
