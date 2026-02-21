@@ -90,6 +90,13 @@ class ExportService:
             0x200A: " ",  # hair space
             0x2060: "",   # word joiner
             0xFEFF: "",   # zero-width no-break space
+            0x2713: "yes",   # check mark
+            0x2714: "yes",   # heavy check mark
+            0x2717: "no",    # ballot x
+            0x2718: "no",    # heavy ballot x
+            0x274C: "no",    # cross mark
+            0x2705: "yes",   # white heavy check mark
+            0xFE0F: "",      # variation selector-16
         })
         return text
 
