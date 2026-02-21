@@ -679,13 +679,18 @@ Generate a concise summary focused on the research query."""
             if options.export_pdf:
                 from .export_service import ExportService
                 export_service = ExportService(self.storage_dir)
-                pdf_path = export_service.generate_pdf(
-                    query_id=query_id,
-                    query=query,
-                    papers=paper_contents,
-                    summary=result["summary"]
-                )
-                result["pdf_path"] = pdf_path
+                try:
+                    print(f"[EXPORT] invoke query_id={query_id}")
+                    pdf_path = export_service.generate_pdf(
+                        query_id=query_id,
+                        query=query,
+                        papers=paper_contents,
+                        summary=result["summary"]
+                    )
+                    result["pdf_path"] = pdf_path
+                except Exception as e:
+                    print(f"[EXPORT] error query_id={query_id}: {e}")
+                    result["pdf_path"] = None
             
             result["status"] = ResearchStatus.COMPLETED
             
