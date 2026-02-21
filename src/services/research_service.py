@@ -4,6 +4,7 @@ import os
 import re
 import uuid
 import math
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -30,6 +31,7 @@ class ResearchService:
         self.embedding_max_chars = int(os.getenv("EMBEDDING_MAX_CHARS", "2000"))
         self.keyword_min_hits = int(os.getenv("KEYWORD_MIN_HITS", "1"))
         self.docling_force_cpu = os.getenv("DOCLING_FORCE_CPU", "true").lower() in {"1", "true", "yes", "on"}
+        self.docling_page_log = os.getenv("DOCLING_PAGE_LOG", "true").lower() in {"1", "true", "yes", "on"}
         
         for d in [self.papers_dir, self.queries_dir, self.summaries_dir]:
             d.mkdir(parents=True, exist_ok=True)
@@ -538,12 +540,43 @@ class ResearchService:
                 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
                 os.environ.setdefault("ORT_DISABLE_GPU", "1")
             from docling.document_converter import DocumentConverter
-            
             converter = DocumentConverter()
+
+            if self.docling_page_log:
+                try:
+                    from pypdf import PdfReader, PdfWriter
+                except Exception:
+                    self.docling_page_log = False
+                    result = converter.convert(str(pdf_path))
+                    return result.document.export_to_markdown()
+
+                reader = PdfReader(str(pdf_path))
+                total_pages = len(reader.pages)
+                if total_pages == 0:
+                    return paper.abstract or ""
+
+                markdown_parts = []
+                for i in range(total_pages):
+                    print(f"[DOC] {paper.paper_id} page {i + 1}/{total_pages}")
+                    writer = PdfWriter()
+                    writer.add_page(reader.pages[i])
+                    tmp_path = None
+                    try:
+                        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                            tmp_path = tmp.name
+                            writer.write(tmp)
+                        result = converter.convert(tmp_path)
+                        markdown_parts.append(result.document.export_to_markdown())
+                    finally:
+                        if tmp_path:
+                            try:
+                                os.unlink(tmp_path)
+                            except Exception:
+                                pass
+                return "\n\n".join(markdown_parts)
+
             result = converter.convert(str(pdf_path))
-            
-            markdown_text = result.document.export_to_markdown()
-            return markdown_text
+            return result.document.export_to_markdown()
         except Exception as e:
             print(f"Docling extraction error for {paper.paper_id}: {e}")
             return paper.abstract or ""
