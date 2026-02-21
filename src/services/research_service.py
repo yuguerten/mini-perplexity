@@ -589,6 +589,7 @@ class ResearchService:
     ) -> str:
         """Generate summary using Ollama"""
         try:
+            print(f"[SUM] start paper_id={paper.paper_id}")
             import ollama
             
             system_prompt = """You are an academic research assistant. 
@@ -617,8 +618,9 @@ Generate a concise summary focused on the research query."""
                     {"role": "user", "content": user_prompt},
                 ],
             )
-            
-            return response.get("message", {}).get("content", "").strip()
+            summary_text = response.get("message", {}).get("content", "").strip()
+            print(f"[SUM] end paper_id={paper.paper_id}")
+            return summary_text
         except Exception as e:
             print(f"Summarization error for {paper.paper_id}: {e}")
             return paper.abstract or ""
@@ -701,6 +703,7 @@ Generate a concise summary focused on the research query."""
     ) -> str:
         """Generate a combined summary from all papers"""
         try:
+            print("[COMBINE] start")
             import ollama
             
             paper_summaries = []
@@ -732,8 +735,9 @@ Generate a consolidated literature review addressing the research query."""
                     {"role": "user", "content": user_prompt},
                 ],
             )
-            
-            return response.get("message", {}).get("content", "").strip()
+            combined = response.get("message", {}).get("content", "").strip()
+            print("[COMBINE] end")
+            return combined
         except Exception as e:
             print(f"Combined summary error: {e}")
             return ""

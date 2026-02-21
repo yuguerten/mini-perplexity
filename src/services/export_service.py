@@ -210,6 +210,7 @@ class ExportService:
         artifacts = self._collect_artifacts(papers)
         pdf_path = self.exports_dir / f"{query_id}.pdf"
 
+        print(f"[EXPORT] start query_id={query_id}")
         doc = Document()
         doc.preamble.append(Command("title", "Research Report"))
         doc.preamble.append(Command("author", "Mini-Perplexity"))
@@ -263,7 +264,7 @@ class ExportService:
                         doc.append(NoEscape(r"\par\noindent\textbf{Source:} " + escape_latex(eq.get("paper_title", "Unknown"))))
 
         doc.generate_pdf(str(pdf_path.with_suffix("")), clean_tex=False)
-        print(f"[EXPORT] PDF generated at {pdf_path}")
+        print(f"[EXPORT] end query_id={query_id} path={pdf_path}")
         return str(pdf_path)
     
     def get_pdf_path(self, query_id: str) -> Optional[str]:
