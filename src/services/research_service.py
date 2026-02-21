@@ -21,15 +21,24 @@ class ResearchService:
         self.papers_dir = self.storage_dir / "papers"
         self.queries_dir = self.storage_dir / "queries"
         self.summaries_dir = self.storage_dir / "summaries"
-        self.exports_dir = self.storage_dir / "exports"
-        self.debug_pdf_download = os.getenv("DEBUG_PDF_DOWNLOAD", "false").lower() in {"1", "true", "yes", "on"}
+        self.debug_citations = os.getenv("DEBUG_CITATIONS", "false").lower() in {"1", "true", "yes", "on"}
         
-        for d in [self.papers_dir, self.queries_dir, self.summaries_dir, self.exports_dir]:
+        for d in [self.papers_dir, self.queries_dir, self.summaries_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
-    def _debug(self, message: str):
-        if self.debug_pdf_download:
-            print(f"[PDF_DEBUG] {message}")
+    def _debug_selected_citations(self, query: str, papers: List[PaperMetadata], max_papers: int):
+        if not self.debug_citations:
+            return
+        selected = papers[:max_papers]
+        total_citations = sum(int(p.citations or 0) for p in selected)
+        print(
+            f"[CITATION_DEBUG] query={query!r} selected={len(selected)} total_citations={total_citations}"
+        )
+        for rank, paper in enumerate(selected, 1):
+            print(
+                f"[CITATION_DEBUG] rank={rank} paper_id={paper.paper_id} "
+                f"source={paper.source} citations={paper.citations or 0} title={paper.title!r}"
+            )
     
     async def search_academic_papers(
         self, 
@@ -52,6 +61,7 @@ class ResearchService:
                 papers.extend(result)
         
         papers.sort(key=lambda p: p.citations or 0, reverse=True)
+        self._debug_selected_citations(query, papers, max_papers)
         return papers[:max_papers]
     
     async def _search_semantic_scholar(
@@ -215,49 +225,21 @@ class ResearchService:
     async def download_paper(self, paper: PaperMetadata) -> Optional[Path]:
         """Download paper PDF to storage"""
         if not paper.pdf_url:
-            self._debug(
-                f"Skip download (no pdf_url) paper_id={paper.paper_id} source={paper.source} "
-                f"paper_url={paper.url}"
-            )
             return None
         
         pdf_path = self.papers_dir / f"{paper.paper_id}.pdf"
         
         if pdf_path.exists():
-            self._debug(
-                f"Reusing existing PDF paper_id={paper.paper_id} path={pdf_path} pdf_url={paper.pdf_url}"
-            )
             return pdf_path
         
         try:
-            self._debug(
-                f"Downloading paper_id={paper.paper_id} source={paper.source} "
-                f"paper_url={paper.url} pdf_url={paper.pdf_url}"
-            )
             async with aiohttp.ClientSession() as session:
                 async with session.get(paper.pdf_url, timeout=60) as resp:
                     if resp.status == 200:
-                        content_type = resp.headers.get("Content-Type", "")
                         content = await resp.read()
-                        if "pdf" not in content_type.lower():
-                            self._debug(
-                                f"Unexpected content-type paper_id={paper.paper_id} "
-                                f"status=200 content_type={content_type} bytes={len(content)}"
-                            )
                         pdf_path.write_bytes(content)
-                        self._debug(
-                            f"Download success paper_id={paper.paper_id} status=200 "
-                            f"bytes={len(content)} saved={pdf_path}"
-                        )
                         return pdf_path
-                    self._debug(
-                        f"Download failed paper_id={paper.paper_id} status={resp.status} "
-                        f"pdf_url={paper.pdf_url}"
-                    )
         except Exception as e:
-            self._debug(
-                f"Download exception paper_id={paper.paper_id} pdf_url={paper.pdf_url} error={e}"
-            )
             print(f"Download error for {paper.paper_id}: {e}")
         
         return None
@@ -344,10 +326,6 @@ Generate a concise summary focused on the research query."""
             paper_contents = []
             
             for paper in papers:
-                self._debug(
-                    f"Pipeline paper paper_id={paper.paper_id} source={paper.source} "
-                    f"paper_url={paper.url} pdf_url={paper.pdf_url or 'None'}"
-                )
                 pdf_path = await self.download_paper(paper)
                 
                 content = await self.extract_content(paper, pdf_path)
@@ -376,7 +354,6 @@ Generate a concise summary focused on the research query."""
                 )
             
             if options.export_pdf:
-                self._cleanup_previous_exports_for_query(query=query, current_query_id=query_id)
                 from .export_service import ExportService
                 export_service = ExportService(self.storage_dir)
                 pdf_path = export_service.generate_pdf(
@@ -395,28 +372,6 @@ Generate a concise summary focused on the research query."""
         
         await self._save_query_state(query_id, result)
         return result
-
-    def _cleanup_previous_exports_for_query(self, query: str, current_query_id: str):
-        """Keep only the newest export for the same query text."""
-        for query_file in self.queries_dir.glob("*.json"):
-            try:
-                data = json.loads(query_file.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-
-            if data.get("query") != query:
-                continue
-            if data.get("query_id") == current_query_id:
-                continue
-
-            old_pdf = data.get("pdf_path")
-            if old_pdf:
-                old_pdf_path = Path(old_pdf)
-                if old_pdf_path.exists():
-                    try:
-                        old_pdf_path.unlink()
-                    except Exception as e:
-                        print(f"Failed to remove old export {old_pdf_path}: {e}")
     
     async def _generate_combined_summary(
         self, 
