@@ -242,7 +242,7 @@ class ExportService:
                             caption = f"{fig.get('alt', 'Figure')} (Source: {fig.get('paper_title', 'Unknown')})"
                             fig_env.add_caption(escape_latex(self._safe_text(caption)))
                         if fig.get("url"):
-                            doc.append(NoEscape(r"\par\noindent\textbf{Source:} " + escape_latex(self._safe_text(fig["url"])))))
+                            doc.append(NoEscape(r"\par\noindent\textbf{Source:} " + escape_latex(self._safe_text(fig["url"]))))
 
         if artifacts["tables"]:
             with doc.create(Section("Tables")):
