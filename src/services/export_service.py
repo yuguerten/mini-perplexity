@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import re
+import subprocess
 
 
 class ExportService:
@@ -270,7 +271,29 @@ class ExportService:
                         doc.append(NoEscape(r"\[" + self._safe_text(eq.get("equation", "")) + r"\]"))
                         doc.append(NoEscape(r"\par\noindent\textbf{Source:} " + escape_latex(self._safe_text(eq.get("paper_title", "Unknown")))))
 
-        doc.generate_pdf(str(pdf_path.with_suffix("")), clean_tex=False)
+        tex_base = pdf_path.with_suffix("")
+        doc.generate_tex(str(tex_base))
+
+        cmd = [
+            "pdflatex",
+            "-interaction=nonstopmode",
+            "-halt-on-error",
+            f"{tex_base.name}.tex",
+        ]
+        proc = subprocess.run(
+            cmd,
+            cwd=str(self.exports_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+        )
+        if proc.returncode != 0:
+            stderr_text = proc.stderr.decode("utf-8", errors="replace")
+            stdout_tail = proc.stdout[-2000:].decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"pdflatex failed rc={proc.returncode}. stderr={stderr_text.strip()} stdout_tail={stdout_tail.strip()}"
+            )
+
         print(f"[EXPORT] end query_id={query_id} path={pdf_path}")
         return str(pdf_path)
     
