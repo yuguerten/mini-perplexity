@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ class ResearchService:
         self.queries_dir = self.storage_dir / "queries"
         self.summaries_dir = self.storage_dir / "summaries"
         self.debug_citations = os.getenv("DEBUG_CITATIONS", "false").lower() in {"1", "true", "yes", "on"}
+        self.debug_query_expansion = os.getenv("DEBUG_QUERY_EXPANSION", "false").lower() in {"1", "true", "yes", "on"}
         
         for d in [self.papers_dir, self.queries_dir, self.summaries_dir]:
             d.mkdir(parents=True, exist_ok=True)
@@ -39,30 +41,135 @@ class ResearchService:
                 f"[CITATION_DEBUG] rank={rank} paper_id={paper.paper_id} "
                 f"source={paper.source} citations={paper.citations or 0} title={paper.title!r}"
             )
+
+    def _debug_query(self, message: str):
+        if self.debug_query_expansion:
+            print(f"[QUERY_DEBUG] {message}")
+
+    async def _generate_subqueries(self, query: str) -> List[str]:
+        """
+        Generate exactly 3 close subqueries for deeper search.
+        Returns deterministic fallbacks if LLM generation fails.
+        """
+        base_query = query.strip()
+        if not base_query:
+            return []
+
+        subqueries: List[str] = []
+        try:
+            import ollama
+            system_prompt = (
+                "You are an academic search query optimizer. "
+                "Given a user query, generate exactly 3 close subqueries for paper retrieval. "
+                "Keep the same intent, no topic drift. "
+                'Return valid JSON only: {"subqueries":["q1","q2","q3"]}'
+            )
+            user_prompt = f"User query: {base_query}"
+            response = ollama.chat(
+                model="lfm2.5-thinking:latest",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            content = response.get("message", {}).get("content", "").strip()
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.endswith("```"):
+                content = content[:-3]
+            parsed = json.loads(content.strip())
+            for q in parsed.get("subqueries", []):
+                q = str(q).strip()
+                if q and q.lower() != base_query.lower() and q.lower() not in {x.lower() for x in subqueries}:
+                    subqueries.append(q)
+                if len(subqueries) >= 3:
+                    break
+        except Exception as e:
+            self._debug_query(f"LLM subquery generation failed: {type(e).__name__}: {e!r}")
+
+        fallback = [
+            f"{base_query} state of the art",
+            f"{base_query} recent advances 2024 2025",
+            f"{base_query} survey",
+        ]
+        for q in fallback:
+            if len(subqueries) >= 3:
+                break
+            if q.lower() not in {x.lower() for x in subqueries}:
+                subqueries.append(q)
+
+        subqueries = subqueries[:3]
+        self._debug_query(f"Generated subqueries={subqueries}")
+        return subqueries
+
+    def _paper_key(self, paper: PaperMetadata) -> str:
+        if paper.paper_id:
+            return paper.paper_id.strip().lower()
+        title = re.sub(r"\s+", " ", (paper.title or "").strip().lower())
+        return f"{paper.source}:{title}"
+
+    def _tokenize(self, text: str) -> set[str]:
+        return set(re.findall(r"[a-z0-9]{3,}", (text or "").lower()))
+
+    def _relevance_score(self, paper: PaperMetadata, original_query: str) -> float:
+        query_tokens = self._tokenize(original_query)
+        title_tokens = self._tokenize(paper.title or "")
+        abstract_tokens = self._tokenize(paper.abstract or "")
+        overlap_score = (len(query_tokens & title_tokens) * 3.0) + (len(query_tokens & abstract_tokens) * 1.5)
+        citation_score = min(float(paper.citations or 0), 500.0) / 25.0
+        pdf_bonus = 1.0 if paper.pdf_url else 0.0
+        return overlap_score + citation_score + pdf_bonus
     
     async def search_academic_papers(
         self, 
         query: str, 
         max_papers: int = 5
     ) -> List[PaperMetadata]:
-        """Search for papers across academic sources"""
-        papers = []
-        
-        tasks = [
-            self._search_semantic_scholar(query, max_papers),
-            self._search_arxiv(query, max_papers),
-            self._search_pubmed(query, max_papers),
-        ]
-        
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        for result in results:
-            if isinstance(result, list):
-                papers.extend(result)
-        
-        papers.sort(key=lambda p: p.citations or 0, reverse=True)
-        self._debug_selected_citations(query, papers, max_papers)
-        return papers[:max_papers]
+        """Search by LLM-generated subqueries, then dedupe and rerank to the original query."""
+        subqueries = await self._generate_subqueries(query)
+        if not subqueries:
+            subqueries = [query]
+
+        all_papers: List[PaperMetadata] = []
+        per_query_limit = max(5, max_papers)
+
+        for subquery in subqueries:
+            tasks = [
+                self._search_semantic_scholar(subquery, per_query_limit),
+                self._search_arxiv(subquery, per_query_limit),
+                self._search_pubmed(subquery, per_query_limit),
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            subquery_count = 0
+            for result in results:
+                if isinstance(result, list):
+                    subquery_count += len(result)
+                    all_papers.extend(result)
+            self._debug_query(f"subquery={subquery!r} raw_hits={subquery_count}")
+
+        deduped: Dict[str, PaperMetadata] = {}
+        for paper in all_papers:
+            key = self._paper_key(paper)
+            if key not in deduped:
+                deduped[key] = paper
+            else:
+                existing = deduped[key]
+                existing_score = (1 if existing.pdf_url else 0) + (1 if existing.abstract else 0)
+                current_score = (1 if paper.pdf_url else 0) + (1 if paper.abstract else 0)
+                if current_score > existing_score:
+                    deduped[key] = paper
+
+        ranked = sorted(
+            deduped.values(),
+            key=lambda p: self._relevance_score(p, query),
+            reverse=True,
+        )
+        self._debug_query(
+            f"raw_total={len(all_papers)} deduped={len(ranked)} selected={min(max_papers, len(ranked))}"
+        )
+        self._debug_selected_citations(query, ranked, max_papers)
+        return ranked[:max_papers]
     
     async def _search_semantic_scholar(
         self, 
