@@ -20,6 +20,7 @@ class RAGService:
         self.storage_dir = Path(storage_dir)
         self.chroma_dir = self.storage_dir / "chroma"
         self.chroma_dir.mkdir(parents=True, exist_ok=True)
+        self.embedding_max_chars = int(os.getenv("EMBEDDING_MAX_CHARS", "2000"))
         
         self.client = chromadb.PersistentClient(path=str(self.chroma_dir))
         self.collection = self.client.get_or_create_collection(
@@ -96,7 +97,7 @@ class RAGService:
             for text in texts:
                 response = ollama.embeddings(
                     model="embeddinggemma",
-                    prompt=text[:8000]
+                    prompt=text[: self.embedding_max_chars]
                 )
                 embeddings.append(response.get("embedding", []))
             

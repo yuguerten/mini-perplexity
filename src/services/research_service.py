@@ -27,6 +27,7 @@ class ResearchService:
         self.debug_query_expansion = os.getenv("DEBUG_QUERY_EXPANSION", "false").lower() in {"1", "true", "yes", "on"}
         self.embedding_model = os.getenv("EMBEDDING_MODEL", "embeddinggemma")
         self.keyword_model = os.getenv("KEYWORD_MODEL", "gpt-oss:20b")
+        self.embedding_max_chars = int(os.getenv("EMBEDDING_MAX_CHARS", "2000"))
         self.keyword_min_hits = int(os.getenv("KEYWORD_MIN_HITS", "1"))
         
         for d in [self.papers_dir, self.queries_dir, self.summaries_dir]:
@@ -140,7 +141,7 @@ class ResearchService:
             for text in texts:
                 response = ollama.embeddings(
                     model=self.embedding_model,
-                    prompt=text[:8000],
+                    prompt=text[: self.embedding_max_chars],
                 )
                 embeddings.append(response.get("embedding", []))
             return embeddings
