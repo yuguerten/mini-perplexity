@@ -1,6 +1,7 @@
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
+import re
 
 
 class ExportService:
@@ -68,6 +69,69 @@ class ExportService:
             md.append(ref)
         
         return "\n".join(md)
+
+    def _extract_figures(self, markdown: str) -> List[Dict[str, str]]:
+        figures = []
+        for match in re.finditer(r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)]+)\)", markdown or ""):
+            alt = match.group("alt").strip() or "Figure"
+            url = match.group("url").strip()
+            if url:
+                figures.append({"alt": alt, "url": url})
+        return figures
+
+    def _extract_tables(self, markdown: str) -> List[List[List[str]]]:
+        tables = []
+        lines = (markdown or "").splitlines()
+        i = 0
+        while i < len(lines) - 1:
+            line = lines[i].strip()
+            sep = lines[i + 1].strip()
+            if "|" in line and re.match(r"^\s*\|?[\s:-]+\|[\s|:-]+\|?\s*$", sep):
+                rows = []
+                header = [c.strip() for c in line.strip("|").split("|")]
+                rows.append(header)
+                i += 2
+                while i < len(lines):
+                    row_line = lines[i].strip()
+                    if not row_line or "|" not in row_line:
+                        break
+                    row = [c.strip() for c in row_line.strip("|").split("|")]
+                    rows.append(row)
+                    i += 1
+                if len(rows) >= 2:
+                    tables.append(rows)
+            else:
+                i += 1
+        return tables
+
+    def _extract_equations(self, markdown: str) -> List[str]:
+        equations = []
+        if not markdown:
+            return equations
+        for match in re.finditer(r"\$\$(.+?)\$\$", markdown, flags=re.DOTALL):
+            eq = match.group(1).strip()
+            if eq:
+                equations.append(eq)
+        for match in re.finditer(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", markdown):
+            eq = match.group(1).strip()
+            if eq:
+                equations.append(eq)
+        return equations
+
+    def _collect_artifacts(self, papers: List) -> Dict[str, List[Dict[str, Any]]]:
+        figures = []
+        tables = []
+        equations = []
+        for paper in papers:
+            title = getattr(paper.metadata, "title", "Unknown")
+            content = paper.full_text or ""
+            for fig in self._extract_figures(content):
+                figures.append({"paper_title": title, **fig})
+            for tbl in self._extract_tables(content):
+                tables.append({"paper_title": title, "rows": tbl})
+            for eq in self._extract_equations(content):
+                equations.append({"paper_title": title, "equation": eq})
+        return {"figures": figures, "tables": tables, "equations": equations}
     
     def _markdown_to_html(self, markdown: str) -> str:
         """Convert markdown to HTML for PDF generation"""
@@ -139,80 +203,66 @@ class ExportService:
         papers: List,
         summary: Optional[str] = None
     ) -> str:
-        """Generate PDF from research results"""
-        from weasyprint import HTML
+        """Generate PDF from research results using PyLaTeX."""
+        from pylatex import Document, Section, Subsection, Command, Figure, Tabular
+        from pylatex.utils import NoEscape, escape_latex
 
-        markdown = self._generate_markdown(query, papers, summary)
-        html_content = self._markdown_to_html(markdown)
-        
-        html_document = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <title>Research Report - {query}</title>
-            <style>
-                @page {{
-                    margin: 2cm;
-                    size: A4;
-                }}
-                body {{
-                    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-                    font-size: 11pt;
-                    line-height: 1.6;
-                    color: #333;
-                }}
-                h1 {{
-                    color: #1a1a1a;
-                    border-bottom: 2px solid #0066cc;
-                    padding-bottom: 10px;
-                    font-size: 24pt;
-                }}
-                h2 {{
-                    color: #333;
-                    margin-top: 30px;
-                    font-size: 16pt;
-                }}
-                h3 {{
-                    color: #555;
-                    font-size: 13pt;
-                    margin-top: 20px;
-                }}
-                p {{
-                    margin: 10px 0;
-                    text-align: justify;
-                }}
-                ul {{
-                    margin: 10px 0;
-                    padding-left: 20px;
-                }}
-                li {{
-                    margin: 5px 0;
-                }}
-                a {{
-                    color: #0066cc;
-                    text-decoration: none;
-                }}
-                hr {{
-                    border: none;
-                    border-top: 1px solid #ccc;
-                    margin: 30px 0;
-                }}
-                strong {{
-                    color: #1a1a1a;
-                }}
-            </style>
-        </head>
-        <body>
-            {html_content}
-        </body>
-        </html>
-        """
-        
+        artifacts = self._collect_artifacts(papers)
         pdf_path = self.exports_dir / f"{query_id}.pdf"
-        
-        HTML(string=html_document).write_pdf(str(pdf_path))
-        
+
+        doc = Document()
+        doc.preamble.append(Command("title", "Research Report"))
+        doc.preamble.append(Command("author", "Mini-Perplexity"))
+        doc.preamble.append(Command("date", NoEscape(r"\today")))
+        doc.append(NoEscape(r"\maketitle"))
+
+        doc.append(NoEscape(r"\noindent\textbf{Query:} " + escape_latex(query)))
+        doc.append(NoEscape(r"\par\textbf{Date:} " + escape_latex(datetime.now().strftime("%Y-%m-%d %H:%M"))))
+
+        if summary:
+            with doc.create(Section("Summary")):
+                doc.append(escape_latex(summary))
+
+        if artifacts["figures"]:
+            with doc.create(Section("Figures")):
+                for i, fig in enumerate(artifacts["figures"], 1):
+                    with doc.create(Subsection(f"Figure {i}")):
+                        with doc.create(Figure(position="h!")) as fig_env:
+                            fig_path = fig.get("url", "")
+                            if fig_path and Path(fig_path).exists():
+                                fig_env.add_image(fig_path, width=NoEscape(r"0.9\textwidth"))
+                            caption = f"{fig.get('alt', 'Figure')} (Source: {fig.get('paper_title', 'Unknown')})"
+                            fig_env.add_caption(escape_latex(caption))
+                        if fig.get("url"):
+                            doc.append(NoEscape(r"\par\noindent\textbf{Source:} " + escape_latex(fig["url"])))
+
+        if artifacts["tables"]:
+            with doc.create(Section("Tables")):
+                for i, tbl in enumerate(artifacts["tables"], 1):
+                    rows = tbl.get("rows") or []
+                    if not rows:
+                        continue
+                    cols = len(rows[0])
+                    col_spec = "|".join(["l"] * cols)
+                    with doc.create(Subsection(f"Table {i}")):
+                        doc.append(NoEscape(r"\noindent\textbf{Source:} " + escape_latex(tbl.get("paper_title", "Unknown")) + r"\par"))
+                        with doc.create(Tabular("|" + col_spec + "|")) as table:
+                            table.add_hline()
+                            for r, row in enumerate(rows):
+                                row = row + [""] * max(0, cols - len(row))
+                                table.add_row([escape_latex(c) for c in row[:cols]])
+                                if r == 0:
+                                    table.add_hline()
+                            table.add_hline()
+
+        if artifacts["equations"]:
+            with doc.create(Section("Equations")):
+                for i, eq in enumerate(artifacts["equations"], 1):
+                    with doc.create(Subsection(f"Equation {i}")):
+                        doc.append(NoEscape(r"\[" + eq.get("equation", "") + r"\]"))
+                        doc.append(NoEscape(r"\par\noindent\textbf{Source:} " + escape_latex(eq.get("paper_title", "Unknown"))))
+
+        doc.generate_pdf(str(pdf_path.with_suffix("")), clean_tex=False)
         return str(pdf_path)
     
     def get_pdf_path(self, query_id: str) -> Optional[str]:

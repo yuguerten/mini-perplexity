@@ -537,7 +537,8 @@ class ResearchService:
             converter = DocumentConverter()
             result = converter.convert(str(pdf_path))
             
-            return result.document.export_to_markdown()
+            markdown_text = result.document.export_to_markdown()
+            return markdown_text
         except Exception as e:
             print(f"Docling extraction error for {paper.paper_id}: {e}")
             return paper.abstract or ""
@@ -618,7 +619,7 @@ Generate a concise summary focused on the research query."""
                 
                 paper_content = PaperContent(
                     metadata=paper,
-                    full_text=content[:5000] if content else None,
+                    full_text=content if content else None,
                     summary=summary,
                 )
                 paper_contents.append(paper_content)
