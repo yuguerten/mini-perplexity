@@ -4,6 +4,7 @@ from datetime import datetime
 import re
 import subprocess
 import unicodedata
+import os
 
 
 class ExportService:
@@ -11,6 +12,9 @@ class ExportService:
         self.storage_dir = Path(storage_dir)
         self.exports_dir = self.storage_dir / "exports"
         self.exports_dir.mkdir(parents=True, exist_ok=True)
+        self.max_figures = int(os.getenv("REPORT_MAX_FIGURES", "8"))
+        self.max_tables = int(os.getenv("REPORT_MAX_TABLES", "8"))
+        self.max_equations = int(os.getenv("REPORT_MAX_EQUATIONS", "12"))
     
     def _generate_markdown(
         self,
@@ -162,6 +166,92 @@ class ExportService:
             for eq in self._extract_equations(content):
                 equations.append({"paper_title": title, "equation": eq})
         return {"figures": figures, "tables": tables, "equations": equations}
+
+    def _inline_to_latex(self, text: str) -> str:
+        from pylatex.utils import escape_latex
+
+        line = self._safe_text(text).strip()
+        if not line:
+            return ""
+
+        # Convert markdown links to plain text with URL.
+        line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", line)
+        # Strip markdown emphasis markers to avoid raw tokens in PDF.
+        line = line.replace("**", "").replace("__", "").replace("*", "")
+
+        math_chunks: Dict[str, str] = {}
+
+        def hold_math(match: re.Match[str]) -> str:
+            key = f"MATHPH{len(math_chunks)}"
+            math_chunks[key] = match.group(0)
+            return key
+
+        line = re.sub(r"\\\(.+?\\\)", hold_math, line)
+        line = re.sub(r"\\\[(?:.|\n)+?\\\]", hold_math, line)
+
+        escaped = escape_latex(line)
+        for key, value in math_chunks.items():
+            escaped = escaped.replace(key, value)
+        return escaped
+
+    def _append_summary_content(self, doc: Any, summary: str) -> None:
+        from pylatex.utils import NoEscape
+
+        lines = self._safe_text(summary).splitlines()
+        in_itemize = False
+        in_enumerate = False
+
+        def close_lists():
+            nonlocal in_itemize, in_enumerate
+            if in_itemize:
+                doc.append(NoEscape(r"\end{itemize}"))
+                in_itemize = False
+            if in_enumerate:
+                doc.append(NoEscape(r"\end{enumerate}"))
+                in_enumerate = False
+
+        for raw in lines:
+            line = raw.strip()
+            if not line or line == "---":
+                close_lists()
+                continue
+            if re.match(r"^\|?[-:\s|]+\|[-:\s|]*$", line):
+                continue
+            if line.startswith("# "):
+                close_lists()
+                doc.append(NoEscape(r"\section*{" + self._inline_to_latex(line[2:]) + "}"))
+                continue
+            if line.startswith("## "):
+                close_lists()
+                doc.append(NoEscape(r"\subsection*{" + self._inline_to_latex(line[3:]) + "}"))
+                continue
+            if line.startswith("### "):
+                close_lists()
+                doc.append(NoEscape(r"\subsubsection*{" + self._inline_to_latex(line[4:]) + "}"))
+                continue
+            num_match = re.match(r"^\d+\.\s+(.*)$", line)
+            if num_match:
+                if in_itemize:
+                    doc.append(NoEscape(r"\end{itemize}"))
+                    in_itemize = False
+                if not in_enumerate:
+                    doc.append(NoEscape(r"\begin{enumerate}"))
+                    in_enumerate = True
+                doc.append(NoEscape(r"\item " + self._inline_to_latex(num_match.group(1))))
+                continue
+            if line.startswith("- ") or line.startswith("* "):
+                if in_enumerate:
+                    doc.append(NoEscape(r"\end{enumerate}"))
+                    in_enumerate = False
+                if not in_itemize:
+                    doc.append(NoEscape(r"\begin{itemize}"))
+                    in_itemize = True
+                doc.append(NoEscape(r"\item " + self._inline_to_latex(line[2:])))
+                continue
+            close_lists()
+            doc.append(NoEscape(self._inline_to_latex(line) + r"\par"))
+
+        close_lists()
     
     def _markdown_to_html(self, markdown: str) -> str:
         """Convert markdown to HTML for PDF generation"""
@@ -241,22 +331,27 @@ class ExportService:
         pdf_path = self.exports_dir / f"{query_id}.pdf"
 
         print(f"[EXPORT] start query_id={query_id}")
-        doc = Document(page_numbers=False)
+        doc = Document(page_numbers=False, geometry_options={"margin": "1in"})
         doc.preamble.append(Command("title", "Research Report"))
         doc.preamble.append(Command("author", "Mini-Perplexity"))
         doc.preamble.append(Command("date", NoEscape(r"\today")))
+        doc.preamble.append(NoEscape(r"\sloppy"))
         doc.append(NoEscape(r"\maketitle"))
 
         doc.append(NoEscape(r"\noindent\textbf{Query:} " + escape_latex(self._safe_text(query))))
         doc.append(NoEscape(r"\par\textbf{Date:} " + escape_latex(self._safe_text(datetime.now().strftime("%Y-%m-%d %H:%M")))))
 
         if summary:
-            with doc.create(Section("Summary")):
-                doc.append(escape_latex(self._safe_text(summary)))
+            doc.append(NoEscape(r"\section*{Summary}"))
+            self._append_summary_content(doc, summary)
 
-        if artifacts["figures"]:
+        figures = artifacts["figures"][: max(0, self.max_figures)]
+        tables = artifacts["tables"][: max(0, self.max_tables)]
+        equations = artifacts["equations"][: max(0, self.max_equations)]
+
+        if figures:
             with doc.create(Section("Figures")):
-                for i, fig in enumerate(artifacts["figures"], 1):
+                for i, fig in enumerate(figures, 1):
                     with doc.create(Subsection(f"Figure {i}")):
                         with doc.create(Figure(position="h!")) as fig_env:
                             fig_path = fig.get("url", "")
@@ -267,11 +362,13 @@ class ExportService:
                         if fig.get("url"):
                             doc.append(NoEscape(r"\par\noindent\textbf{Source:} " + escape_latex(self._safe_text(fig["url"]))))
 
-        if artifacts["tables"]:
+        if tables:
             with doc.create(Section("Tables")):
-                for i, tbl in enumerate(artifacts["tables"], 1):
+                for i, tbl in enumerate(tables, 1):
                     rows = tbl.get("rows") or []
                     if not rows:
+                        continue
+                    if len(rows[0]) > 8 or len(rows) > 30:
                         continue
                     cols = len(rows[0])
                     col_spec = "|".join(["l"] * cols)
@@ -286,9 +383,9 @@ class ExportService:
                                     table.add_hline()
                             table.add_hline()
 
-        if artifacts["equations"]:
+        if equations:
             with doc.create(Section("Equations")):
-                for i, eq in enumerate(artifacts["equations"], 1):
+                for i, eq in enumerate(equations, 1):
                     with doc.create(Subsection(f"Equation {i}")):
                         doc.append(NoEscape(r"\[" + self._safe_text(eq.get("equation", "")) + r"\]"))
                         doc.append(NoEscape(r"\par\noindent\textbf{Source:} " + escape_latex(self._safe_text(eq.get("paper_title", "Unknown")))))

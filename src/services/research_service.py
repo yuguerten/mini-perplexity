@@ -735,7 +735,9 @@ Create a consolidated literature review that:
 1. Synthesizes findings across multiple papers
 2. Addresses the research query directly
 3. Uses academic tone and structure
-4. Includes proper citations [1], [2], etc."""
+4. Includes proper citations [1], [2], etc.
+5. Avoids markdown tables, emoji, checkmarks, and decorative symbols
+6. Uses plain section headings and concise paragraphs"""
             
             user_prompt = f"""Research query: {query}
 
