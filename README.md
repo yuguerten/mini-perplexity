@@ -29,7 +29,7 @@ Implemented now:
   - ChromaDB collection for chunked paper content
   - Retrieval and answer generation endpoint
 - Model defaults switched to:
-  - `lfm2.5-thinking:latest`
+  - `gpt-oss:20b`
 
 ## Architecture
 
@@ -123,7 +123,7 @@ pip install -e .
 ### Pull model
 
 ```bash
-ollama pull lfm2.5-thinking:latest
+ollama pull gpt-oss:20b
 ```
 
 ### Run API

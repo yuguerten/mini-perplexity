@@ -33,7 +33,7 @@ custom_theme = Theme({
 # Initialize rich console
 console = Console(theme=custom_theme)
 
-MODEL = "lfm2.5-thinking:latest"
+MODEL = "gpt-oss:20b"
 
 def _input_with_default(prompt: str, default: str) -> str:
     """Get user input with a default value"""

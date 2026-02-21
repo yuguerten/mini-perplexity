@@ -500,7 +500,7 @@ def search_and_crawl(query: str, searx_url: str = None, num_results: int = 10,
     return urls, crawled_content
 
 
-def summarize_content(url: str, content: str, original_question: str = "", model: str = "lfm2.5-thinking:latest", reference_id: int = 0) -> str:
+def summarize_content(url: str, content: str, original_question: str = "", model: str = "gpt-oss:20b", reference_id: int = 0) -> str:
     """
     Use an LLM to summarize the content from a URL in relation to the user's question.
     
@@ -575,7 +575,7 @@ def summarize_content(url: str, content: str, original_question: str = "", model
 
 
 def summarize_content_batch(url_content_pairs: List[Tuple[str, str]], 
-                            model: str = "lfm2.5-thinking:latest",
+                            model: str = "gpt-oss:20b",
                             original_question: str = "",
                             clarification_qa: List[Tuple[str, str]] = None,
                             output_file: Optional[str] = None) -> Dict[str, str]:
@@ -754,7 +754,7 @@ def search_with_multiple_queries(queries: List[str], searx_url: str = None,
 
 
 def search_crawl_and_summarize(query: str, searx_url: str = None, num_results: int = 10,
-                              model: str = "lfm2.5-thinking:latest", 
+                              model: str = "gpt-oss:20b", 
                               crawl_output_file: Optional[str] = None,
                               summary_output_file: Optional[str] = None,
                               verbose: bool = False,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-MODEL = "lfm2.5-thinking:latest"
+MODEL = "gpt-oss:20b"
 
 
 def _fallback_clarifying_questions(question: str) -> Dict[str, List[str]]:

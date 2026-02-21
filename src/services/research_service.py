@@ -26,7 +26,7 @@ class ResearchService:
         self.debug_citations = os.getenv("DEBUG_CITATIONS", "false").lower() in {"1", "true", "yes", "on"}
         self.debug_query_expansion = os.getenv("DEBUG_QUERY_EXPANSION", "false").lower() in {"1", "true", "yes", "on"}
         self.embedding_model = os.getenv("EMBEDDING_MODEL", "embeddinggemma")
-        self.keyword_model = os.getenv("KEYWORD_MODEL", "lfm2.5-thinking:latest")
+        self.keyword_model = os.getenv("KEYWORD_MODEL", "gpt-oss:20b")
         self.keyword_min_hits = int(os.getenv("KEYWORD_MIN_HITS", "1"))
         
         for d in [self.papers_dir, self.queries_dir, self.summaries_dir]:
@@ -70,7 +70,7 @@ class ResearchService:
             )
             user_prompt = f"User query: {base_query}"
             response = ollama.chat(
-                model="lfm2.5-thinking:latest",
+                model="gpt-oss:20b",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -572,7 +572,7 @@ Full content (excerpt):
 Generate a concise summary focused on the research query."""
             
             response = ollama.chat(
-                model="lfm2.5-thinking:latest",
+                model="gpt-oss:20b",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -687,7 +687,7 @@ Papers summary:
 Generate a consolidated literature review addressing the research query."""
             
             response = ollama.chat(
-                model="lfm2.5-thinking:latest",
+                model="gpt-oss:20b",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},

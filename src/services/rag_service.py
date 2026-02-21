@@ -174,7 +174,7 @@ Context from papers:
 Provide a detailed answer citing sources [1], [2], etc."""
             
             response = ollama.chat(
-                model="lfm2.5-thinking:latest",
+                model="gpt-oss:20b",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
