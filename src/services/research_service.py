@@ -7,7 +7,7 @@ import math
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Set, Tuple
 import aiohttp
 
 from ..api.models import (
@@ -99,7 +99,7 @@ class ResearchService:
             parsed = json.loads(content.strip())
             for q in parsed.get("subqueries", []):
                 q = str(q).strip()
-                if q and q.lower() != base_query.lower() and q.lower() not in {x.lower() for x in subqueries}:
+                if q and q.lower() not in {x.lower() for x in subqueries}:
                     subqueries.append(q)
                 if len(subqueries) >= 3:
                     break
@@ -107,15 +107,18 @@ class ResearchService:
             self._debug_query(f"LLM subquery generation failed: {type(e).__name__}: {e!r}")
 
         fallback = [
-            f"{base_query} transformer self attention",
-            f"{base_query} efficient attention mechanism",
-            f"{base_query} 2024 2025 2026",
+            base_query,
+            f"{base_query} 2025",
+            f"{base_query} 2026",
         ]
         for q in fallback:
             if len(subqueries) >= 3:
                 break
             if q.lower() not in {x.lower() for x in subqueries}:
                 subqueries.append(q)
+
+        if base_query.lower() not in {x.lower() for x in subqueries}:
+            subqueries.insert(0, base_query)
 
         subqueries = subqueries[:3]
         self._debug_query(f"Generated subqueries={subqueries}")
@@ -148,6 +151,62 @@ class ResearchService:
             return int(match.group(0))
         except ValueError:
             return None
+
+    def _normalize_query_token(self, token: str) -> str:
+        t = re.sub(r"[^a-z0-9]", "", (token or "").lower())
+        if not t:
+            return ""
+        yolo_match = re.fullmatch(r"yolov?(\d+)", t)
+        if yolo_match:
+            return f"yolo{yolo_match.group(1)}"
+        return t
+
+    def _extract_query_terms(self, query: str) -> Set[str]:
+        stopwords = {
+            "the", "and", "for", "with", "from", "that", "this", "those", "these",
+            "into", "over", "under", "between", "within", "across", "about", "paper",
+            "papers", "research", "study", "analysis", "approach", "method", "methods",
+            "model", "models", "architecture", "system", "systems", "what", "changed",
+            "change", "now", "recent", "latest", "new", "using", "based", "after",
+            "since", "need",
+        }
+        tokens = re.findall(r"[a-z0-9][a-z0-9\-]{1,}", (query or "").lower())
+        terms: Set[str] = set()
+        for raw in tokens:
+            norm = self._normalize_query_token(raw)
+            if not norm:
+                continue
+            if norm in stopwords:
+                continue
+            if len(norm) < 3 and not any(ch.isdigit() for ch in norm):
+                continue
+            terms.add(norm)
+        return terms
+
+    def _extract_anchor_terms(self, query_terms: Set[str]) -> Set[str]:
+        anchors = {t for t in query_terms if any(ch.isdigit() for ch in t)}
+        if anchors:
+            return anchors
+        high_signal = {
+            "distillation", "attention", "transformer", "diffusion", "segmentation",
+            "detection", "retrieval", "summarization", "llm", "bert", "gpt", "yolo",
+        }
+        return {t for t in query_terms if t in high_signal}
+
+    def _paper_tokens(self, paper: PaperMetadata) -> Set[str]:
+        text = self._paper_text(paper)
+        raw_tokens = re.findall(r"[a-z0-9][a-z0-9\-]{1,}", (text or "").lower())
+        return {self._normalize_query_token(t) for t in raw_tokens if self._normalize_query_token(t)}
+
+    def _paper_term_hits(
+        self, paper: PaperMetadata, query_terms: Set[str], anchor_terms: Set[str]
+    ) -> Tuple[int, int]:
+        if not query_terms:
+            return 0, 0
+        paper_tokens = self._paper_tokens(paper)
+        hits = len(query_terms & paper_tokens)
+        anchor_hits = len(anchor_terms & paper_tokens) if anchor_terms else 0
+        return hits, anchor_hits
 
     def _cosine_sim(self, a: List[float], b: List[float]) -> float:
         if not a or not b or len(a) != len(b):
@@ -230,11 +289,17 @@ class ResearchService:
         paper: PaperMetadata,
         query_embedding: List[float],
         paper_embedding: List[float],
+        term_hits: int,
+        anchor_hits: int,
+        year: int,
+        cutoff_year: int,
     ) -> float:
         sim = self._cosine_sim(query_embedding, paper_embedding)
         citation_score = math.log1p(float(paper.citations or 0)) * 0.2
         pdf_bonus = 0.3 if paper.pdf_url else 0.0
-        return (sim * 10.0) + citation_score + pdf_bonus
+        lexical_bonus = (term_hits * 1.4) + (anchor_hits * 2.0)
+        recency_bonus = max(0, year - cutoff_year) * 0.1
+        return (sim * 10.0) + citation_score + pdf_bonus + lexical_bonus + recency_bonus
     
     async def search_academic_papers(
         self, 
@@ -299,21 +364,52 @@ class ResearchService:
         if not papers:
             return []
 
+        query_terms = self._extract_query_terms(query)
+        anchor_terms = self._extract_anchor_terms(query_terms)
+        term_stats: Dict[str, Tuple[int, int]] = {}
+
+        if query_terms:
+            min_hits = 1 if len(query_terms) <= 2 else 2
+            topical_papers: List[PaperMetadata] = []
+            for paper in papers:
+                hits, anchor_hits = self._paper_term_hits(paper, query_terms, anchor_terms)
+                term_stats[paper.paper_id] = (hits, anchor_hits)
+                if hits < min_hits:
+                    continue
+                if anchor_terms and anchor_hits == 0:
+                    continue
+                topical_papers.append(paper)
+
+            self._debug_query(
+                f"topical_filter terms={sorted(query_terms)} anchors={sorted(anchor_terms)} "
+                f"min_hits={min_hits} kept={len(topical_papers)} removed={len(papers) - len(topical_papers)}"
+            )
+            if topical_papers:
+                papers = topical_papers
+            else:
+                self._debug_query("topical_filter yielded no papers; returning empty result")
+                return []
+        else:
+            self._debug_query("topical_filter skipped (no usable query terms)")
+
         query_embedding = self._get_embeddings([query])[0]
         paper_texts = [self._paper_text(p) for p in papers]
         paper_embeddings = self._get_embeddings(paper_texts)
 
         scored = []
         for paper, emb in zip(papers, paper_embeddings):
-            score = self._score_paper(paper, query_embedding, emb)
             year = self._extract_year(paper.published_date) or 0
+            hits, anchor_hits = term_stats.get(paper.paper_id, self._paper_term_hits(paper, query_terms, anchor_terms))
+            score = self._score_paper(
+                paper, query_embedding, emb, hits, anchor_hits, year, cutoff_year
+            )
             self._debug_query(
-                f"score={score:.4f} year={year} source={paper.source} "
+                f"score={score:.4f} year={year} hits={hits} anchors={anchor_hits} source={paper.source} "
                 f"paper_id={paper.paper_id} title={paper.title!r}"
             )
             scored.append((paper, score, year))
 
-        ordered = sorted(scored, key=lambda x: (x[2], x[1]), reverse=True)
+        ordered = sorted(scored, key=lambda x: (x[1], x[2]), reverse=True)
 
         ranked = [p for p, _, _ in ordered]
 
@@ -374,8 +470,7 @@ class ResearchService:
         params = {
             "search_query": f"all:{query}",
             "max_results": limit,
-            "sortBy": "submittedDate",
-            "sortOrder": "descending",
+            "sortBy": "relevance",
         }
         
         try:
@@ -678,6 +773,15 @@ Generate a concise summary focused on the research query."""
         
         try:
             papers = await self.search_academic_papers(query, options.max_papers)
+            if not papers:
+                result["status"] = ResearchStatus.COMPLETED
+                result["summary"] = (
+                    f"No relevant papers were found for '{query}' in the last "
+                    f"{self.recent_paper_years} year(s). "
+                    "Try broadening the query terms, using a nearby model name, or increasing the time window."
+                )
+                await self._save_query_state(query_id, result)
+                return result
             
             paper_contents = []
             
