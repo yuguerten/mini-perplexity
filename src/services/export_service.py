@@ -15,6 +15,7 @@ class ExportService:
         self.max_figures = int(os.getenv("REPORT_MAX_FIGURES", "8"))
         self.max_tables = int(os.getenv("REPORT_MAX_TABLES", "8"))
         self.max_equations = int(os.getenv("REPORT_MAX_EQUATIONS", "12"))
+        self.include_artifacts = os.getenv("REPORT_INCLUDE_ARTIFACTS", "false").lower() in {"1", "true", "yes", "on"}
     
     def _generate_markdown(
         self,
@@ -210,6 +211,8 @@ class ExportService:
             math_chunks[key] = match.group(0)
             return key
 
+        line = re.sub(r"\$\$(?:.|\n)+?\$\$", hold_math, line)
+        line = re.sub(r"(?<!\$)\$(?!\$).+?(?<!\$)\$(?!\$)", hold_math, line)
         line = re.sub(r"\\\(.+?\\\)", hold_math, line)
         line = re.sub(r"\\\[(?:.|\n)+?\\\]", hold_math, line)
 
@@ -217,6 +220,44 @@ class ExportService:
         for key, value in math_chunks.items():
             escaped = escaped.replace(key, value)
         return escaped
+
+    def _is_table_separator(self, line: str) -> bool:
+        return bool(re.match(r"^\s*\|?[\s:-]+\|[\s|:-]+\|?\s*$", (line or "").strip()))
+
+    def _normalize_math_for_latex(self, expr: str) -> str:
+        text = self._safe_text(expr)
+        replacements = {
+            "ˆ": "^",
+            "−": "-",
+            "–": "-",
+            "—": "-",
+            "·": r" \cdot ",
+            "×": r" \times ",
+            "÷": r" \div ",
+            "≤": r" \leq ",
+            "≥": r" \geq ",
+            "≠": r" \neq ",
+            "≈": r" \approx ",
+            "∞": r" \infty ",
+            "∑": r" \sum ",
+            "∏": r" \prod ",
+            "∂": r" \partial ",
+            "∇": r" \nabla ",
+            "α": r"\alpha",
+            "β": r"\beta",
+            "γ": r"\gamma",
+            "δ": r"\delta",
+            "θ": r"\theta",
+            "λ": r"\lambda",
+            "μ": r"\mu",
+            "π": r"\pi",
+            "σ": r"\sigma",
+            "φ": r"\phi",
+            "ω": r"\omega",
+        }
+        for src, dst in replacements.items():
+            text = text.replace(src, dst)
+        return text.strip()
 
     def _append_summary_content(self, doc: Any, summary: str) -> None:
         from pylatex.utils import NoEscape
@@ -234,24 +275,82 @@ class ExportService:
                 doc.append(NoEscape(r"\end{enumerate}"))
                 in_enumerate = False
 
-        for raw in lines:
-            line = raw.strip()
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
             if not line or line == "---":
                 close_lists()
+                i += 1
                 continue
-            if re.match(r"^\|?[-:\s|]+\|[-:\s|]*$", line):
+
+            if line.startswith(r"\["):
+                close_lists()
+                equation_lines = []
+                first = line[2:].strip()
+                if first:
+                    equation_lines.append(first)
+                i += 1
+                while i < len(lines):
+                    current = lines[i].strip()
+                    if current.endswith(r"\]"):
+                        tail = current[:-2].strip()
+                        if tail:
+                            equation_lines.append(tail)
+                        break
+                    equation_lines.append(current)
+                    i += 1
+                eq = self._normalize_math_for_latex(" ".join(equation_lines))
+                if eq:
+                    doc.append(NoEscape(r"\[" + eq + r"\]"))
+                i += 1
                 continue
+
+            if line.startswith("$$"):
+                close_lists()
+                equation_lines = []
+                first = line[2:].strip()
+                if first:
+                    equation_lines.append(first)
+                i += 1
+                while i < len(lines):
+                    current = lines[i].strip()
+                    if current.endswith("$$"):
+                        tail = current[:-2].strip()
+                        if tail:
+                            equation_lines.append(tail)
+                        break
+                    equation_lines.append(current)
+                    i += 1
+                eq = self._normalize_math_for_latex(" ".join(equation_lines))
+                if eq:
+                    doc.append(NoEscape(r"\[" + eq + r"\]"))
+                i += 1
+                continue
+
+            if "|" in line and i + 1 < len(lines) and self._is_table_separator(lines[i + 1]):
+                close_lists()
+                i += 2
+                while i < len(lines) and "|" in lines[i]:
+                    i += 1
+                continue
+            if self._is_table_separator(line):
+                i += 1
+                continue
+
             if line.startswith("# "):
                 close_lists()
                 doc.append(NoEscape(r"\section*{" + self._inline_to_latex(line[2:]) + "}"))
+                i += 1
                 continue
             if line.startswith("## "):
                 close_lists()
                 doc.append(NoEscape(r"\subsection*{" + self._inline_to_latex(line[3:]) + "}"))
+                i += 1
                 continue
             if line.startswith("### "):
                 close_lists()
                 doc.append(NoEscape(r"\subsubsection*{" + self._inline_to_latex(line[4:]) + "}"))
+                i += 1
                 continue
             num_match = re.match(r"^\d+\.\s+(.*)$", line)
             if num_match:
@@ -262,6 +361,7 @@ class ExportService:
                     doc.append(NoEscape(r"\begin{enumerate}"))
                     in_enumerate = True
                 doc.append(NoEscape(r"\item " + self._inline_to_latex(num_match.group(1))))
+                i += 1
                 continue
             if line.startswith("- ") or line.startswith("* "):
                 if in_enumerate:
@@ -271,9 +371,11 @@ class ExportService:
                     doc.append(NoEscape(r"\begin{itemize}"))
                     in_itemize = True
                 doc.append(NoEscape(r"\item " + self._inline_to_latex(line[2:])))
+                i += 1
                 continue
             close_lists()
             doc.append(NoEscape(self._inline_to_latex(line) + r"\par"))
+            i += 1
 
         close_lists()
     
@@ -351,7 +453,7 @@ class ExportService:
         from pylatex import Document, Section, Subsection, Command, Figure, Tabular
         from pylatex.utils import NoEscape, escape_latex
 
-        artifacts = self._collect_artifacts(papers)
+        artifacts = self._collect_artifacts(papers) if self.include_artifacts else {"figures": [], "tables": [], "equations": []}
         pdf_path = self.exports_dir / f"{query_id}.pdf"
 
         print(f"[EXPORT] start query_id={query_id}")
