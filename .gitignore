@@ -15,3 +15,4 @@ queries
 *.sqlite3
 data/chroma/chroma.sqlite3
 data
+notebooks/

@@ -16,7 +16,7 @@ from ..api.models import (
     ResearchOptions,
     ResearchStatus,
 )
-
+import logging
 
 class ResearchService:
     def __init__(self, storage_dir: str = "data"):
@@ -282,6 +282,10 @@ class ResearchService:
         for paper, emb in zip(papers, paper_embeddings):
             score = self._score_paper(paper, query_embedding, emb, keywords)
             hits = self._keyword_hits(keywords, self._paper_text(paper)) if keywords else 0
+            self._debug_query(
+                f"score={score:.4f} hits={hits} source={paper.source} "
+                f"paper_id={paper.paper_id} title={paper.title!r}"
+            )
             scored.append((paper, score, hits))
 
         if keywords:
