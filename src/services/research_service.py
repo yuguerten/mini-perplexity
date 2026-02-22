@@ -41,6 +41,44 @@ class ResearchService:
             return value.decode("utf-8", errors="replace")
         return str(value).encode("utf-8", errors="replace").decode("utf-8")
 
+    def _postprocess_summary_text(self, text: str, paper_count: int = 0) -> str:
+        cleaned = self._normalize_text(text or "")
+        cleaned = cleaned.replace("—", "-").replace("–", "-")
+
+        lines = cleaned.splitlines()
+        normalized_lines: List[str] = []
+        for raw in lines:
+            line = raw.strip()
+            if not line:
+                normalized_lines.append("")
+                continue
+            if re.fullmatch(r"\*\*.+\*\*", line):
+                normalized_lines.append(line)
+                continue
+            if line.startswith(("#", "- ", "* ", r"\[", "$$", "|")):
+                normalized_lines.append(line)
+                continue
+            if re.match(r"^\d+\.\s+", line):
+                normalized_lines.append(line)
+                continue
+            if (
+                len(line) <= 72
+                and len(line.split()) <= 9
+                and not re.search(r"[.!?]$", line)
+                and line == line.title()
+            ):
+                normalized_lines.append(f"**{line}**")
+                continue
+            normalized_lines.append(line)
+
+        cleaned = "\n".join(normalized_lines).strip()
+
+        if paper_count > 0 and not re.search(r"\[\d+\]", cleaned):
+            refs = ", ".join(f"[{i}]" for i in range(1, min(paper_count, 6) + 1))
+            cleaned = f"{cleaned}\n\n**Citations:** {refs}"
+
+        return cleaned
+
         for d in [self.papers_dir, self.queries_dir, self.summaries_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
@@ -746,12 +784,12 @@ class ResearchService:
             print(f"[SUM] start paper_id={paper.paper_id}")
             import ollama
             
-            system_prompt = """You are an academic research assistant. 
-Generate a concise summary of the paper that:
-1. Focuses on content relevant to the research query
-2. Highlights key findings and methodology
-3. Uses factual and objective language
-4. Is 2-3 paragraphs maximum"""
+            system_prompt = """You are an academic research assistant.
+Write a concise paper summary:
+1. Focus on points directly relevant to the research query.
+2. Keep it to 2 short paragraphs, max 120 words total.
+3. No equations, no tables, no markdown lists.
+4. Use plain punctuation and use '-' instead of em dash."""
             
             user_prompt = f"""Research query: {query}
 
@@ -772,7 +810,9 @@ Generate a concise summary focused on the research query."""
                     {"role": "user", "content": user_prompt},
                 ],
             )
-            summary_text = response.get("message", {}).get("content", "").strip()
+            summary_text = self._postprocess_summary_text(
+                response.get("message", {}).get("content", "").strip()
+            )
             print(f"[SUM] end paper_id={paper.paper_id}")
             return summary_text
         except Exception as e:
@@ -882,13 +922,15 @@ Generate a concise summary focused on the research query."""
             combined_text = "\n\n---\n\n".join(paper_summaries)
             
             system_prompt = """You are an academic research assistant.
-Create a consolidated literature review that:
-1. Synthesizes findings across multiple papers
-2. Addresses the research query directly
-3. Uses academic tone and structure
-4. Includes proper citations [1], [2], etc.
-5. Avoids markdown tables, emoji, checkmarks, and decorative symbols
-6. Uses plain section headings and concise paragraphs"""
+Create a concise consolidated review.
+Output rules:
+1. Use 4-6 sections with titles in bold markdown on their own lines, for example **Introduction**.
+2. Keep each section to 2-4 short sentences.
+3. Add bracket citations like [1], [2] for factual claims.
+4. Use only citation indices that correspond to provided papers.
+5. No equations, no tables, no checkmarks, no emoji.
+6. Use '-' instead of em dash.
+7. Keep total length under 320 words."""
             
             user_prompt = f"""Research query: {query}
 
@@ -905,7 +947,10 @@ Generate a consolidated literature review addressing the research query."""
                     {"role": "user", "content": user_prompt},
                 ],
             )
-            combined = response.get("message", {}).get("content", "").strip()
+            combined = self._postprocess_summary_text(
+                response.get("message", {}).get("content", "").strip(),
+                paper_count=len(papers),
+            )
             print("[COMBINE] end")
             return combined
         except Exception as e:

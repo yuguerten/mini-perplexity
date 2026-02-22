@@ -95,6 +95,8 @@ class ExportService:
             0x200A: " ",  # hair space
             0x2060: "",   # word joiner
             0xFEFF: "",   # zero-width no-break space
+            0x2013: "-",  # en dash
+            0x2014: "-",  # em dash
             0x2713: "yes",   # check mark
             0x2714: "yes",   # heavy check mark
             0x2717: "no",    # ballot x
@@ -201,8 +203,19 @@ class ExportService:
 
         # Convert markdown links to plain text with URL.
         line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", line)
-        # Strip markdown emphasis markers to avoid raw tokens in PDF.
-        line = line.replace("**", "").replace("__", "").replace("*", "")
+
+        bold_chunks: Dict[str, str] = {}
+
+        def hold_bold(match: re.Match[str]) -> str:
+            key = f"BOLDPH{len(bold_chunks)}"
+            bold_chunks[key] = match.group(1).strip()
+            return key
+
+        # Preserve markdown bold as LaTeX bold.
+        line = re.sub(r"\*\*(.+?)\*\*", hold_bold, line)
+        line = re.sub(r"__(.+?)__", hold_bold, line)
+        # Remove remaining emphasis markers.
+        line = line.replace("*", "")
 
         math_chunks: Dict[str, str] = {}
 
@@ -217,6 +230,9 @@ class ExportService:
         line = re.sub(r"\\\[(?:.|\n)+?\\\]", hold_math, line)
 
         escaped = escape_latex(line)
+        for key, value in bold_chunks.items():
+            bold_text = escape_latex(self._safe_text(value))
+            escaped = escaped.replace(key, r"\textbf{" + bold_text + "}")
         for key, value in math_chunks.items():
             escaped = escaped.replace(key, value)
         return escaped
