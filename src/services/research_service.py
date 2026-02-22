@@ -30,6 +30,7 @@ class ResearchService:
         self.keyword_model = os.getenv("KEYWORD_MODEL", "gpt-oss:20b")
         self.embedding_max_chars = int(os.getenv("EMBEDDING_MAX_CHARS", "2000"))
         self.keyword_min_hits = int(os.getenv("KEYWORD_MIN_HITS", "1"))
+        self.recent_paper_years = int(os.getenv("RECENT_PAPER_YEARS", "2"))
         self.docling_force_cpu = os.getenv("DOCLING_FORCE_CPU", "true").lower() in {"1", "true", "yes", "on"}
         self.docling_page_log = os.getenv("DOCLING_PAGE_LOG", "true").lower() in {"1", "true", "yes", "on"}
         self.docling_max_pages = int(os.getenv("DOCLING_MAX_PAGES", "4"))
@@ -75,9 +76,11 @@ class ResearchService:
         try:
             import ollama
             system_prompt = (
-                "You are an academic search query optimizer. "
-                "Given a user query, generate exactly 3 close subqueries for paper retrieval. "
-                "Keep the same intent, no topic drift. "
+                "You generate search queries for academic paper APIs (Semantic Scholar, arXiv, PubMed). "
+                "Given a user query, produce exactly 3 compact keyword-style subqueries for the same technical topic. "
+                "Keep core domain terms from the original query. "
+                "Do not introduce unrelated domains or broad meta wording. "
+                "Avoid generic terms such as evolution, improvements, changed, developments, history. "
                 'Return valid JSON only: {"subqueries":["q1","q2","q3"]}'
             )
             user_prompt = f"User query: {base_query}"
@@ -104,9 +107,9 @@ class ResearchService:
             self._debug_query(f"LLM subquery generation failed: {type(e).__name__}: {e!r}")
 
         fallback = [
-            f"{base_query} state of the art",
-            f"{base_query} recent advances 2024 2025",
-            f"{base_query} survey",
+            f"{base_query} transformer self attention",
+            f"{base_query} efficient attention mechanism",
+            f"{base_query} 2024 2025 2026",
         ]
         for q in fallback:
             if len(subqueries) >= 3:
@@ -133,6 +136,18 @@ class ResearchService:
         if abstract:
             return f"{title}\n{abstract}"
         return title
+
+    def _extract_year(self, published_date: Optional[str]) -> Optional[int]:
+        if not published_date:
+            return None
+        text = str(published_date).strip()
+        match = re.search(r"(19|20)\d{2}", text)
+        if not match:
+            return None
+        try:
+            return int(match.group(0))
+        except ValueError:
+            return None
 
     def _cosine_sim(self, a: List[float], b: List[float]) -> float:
         if not a or not b or len(a) != len(b):
@@ -215,14 +230,11 @@ class ResearchService:
         paper: PaperMetadata,
         query_embedding: List[float],
         paper_embedding: List[float],
-        keywords: List[str],
     ) -> float:
         sim = self._cosine_sim(query_embedding, paper_embedding)
-        hits = self._keyword_hits(keywords, self._paper_text(paper))
-        keyword_boost = min(hits, 3) * 0.8
         citation_score = math.log1p(float(paper.citations or 0)) * 0.2
         pdf_bonus = 0.3 if paper.pdf_url else 0.0
-        return (sim * 10.0) + keyword_boost + citation_score + pdf_bonus
+        return (sim * 10.0) + citation_score + pdf_bonus
     
     async def search_academic_papers(
         self, 
@@ -270,9 +282,22 @@ class ResearchService:
 
         await self._enrich_arxiv_citations(papers)
 
-        keywords = await self._extract_keywords(query)
-        if keywords:
-            self._debug_query(f"keywords={keywords}")
+        window_years = max(self.recent_paper_years, 1)
+        cutoff_year = datetime.now(timezone.utc).year - (window_years - 1)
+        recent_papers = []
+        for paper in papers:
+            year = self._extract_year(paper.published_date)
+            if year is None:
+                continue
+            if year >= cutoff_year:
+                recent_papers.append(paper)
+        self._debug_query(
+            f"recent_filter window_years={window_years} cutoff_year={cutoff_year} "
+            f"kept={len(recent_papers)} removed={len(papers) - len(recent_papers)}"
+        )
+        papers = recent_papers
+        if not papers:
+            return []
 
         query_embedding = self._get_embeddings([query])[0]
         paper_texts = [self._paper_text(p) for p in papers]
@@ -280,25 +305,15 @@ class ResearchService:
 
         scored = []
         for paper, emb in zip(papers, paper_embeddings):
-            score = self._score_paper(paper, query_embedding, emb, keywords)
-            hits = self._keyword_hits(keywords, self._paper_text(paper)) if keywords else 0
+            score = self._score_paper(paper, query_embedding, emb)
+            year = self._extract_year(paper.published_date) or 0
             self._debug_query(
-                f"score={score:.4f} hits={hits} source={paper.source} "
+                f"score={score:.4f} year={year} source={paper.source} "
                 f"paper_id={paper.paper_id} title={paper.title!r}"
             )
-            scored.append((paper, score, hits))
+            scored.append((paper, score, year))
 
-        if keywords:
-            primary = [s for s in scored if s[2] >= self.keyword_min_hits]
-            secondary = [s for s in scored if s[2] < self.keyword_min_hits]
-            if not primary:
-                primary = scored
-                secondary = []
-            primary.sort(key=lambda x: x[1], reverse=True)
-            secondary.sort(key=lambda x: x[1], reverse=True)
-            ordered = primary + secondary
-        else:
-            ordered = sorted(scored, key=lambda x: x[1], reverse=True)
+        ordered = sorted(scored, key=lambda x: (x[2], x[1]), reverse=True)
 
         ranked = [p for p, _, _ in ordered]
 
@@ -359,7 +374,8 @@ class ResearchService:
         params = {
             "search_query": f"all:{query}",
             "max_results": limit,
-            "sortBy": "relevance",
+            "sortBy": "submittedDate",
+            "sortOrder": "descending",
         }
         
         try:
@@ -423,7 +439,8 @@ class ResearchService:
                     "db": "pubmed",
                     "term": query,
                     "retmax": limit,
-                    "retmode": "json"
+                    "retmode": "json",
+                    "sort": "pub date",
                 }
                 
                 async with session.get(search_url, params=params, timeout=30) as resp:
