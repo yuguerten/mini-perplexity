@@ -12,7 +12,6 @@ class ResearchStatus(str, Enum):
 
 
 class ResearchOptions(BaseModel):
-    max_papers: int = Field(default=5, ge=1, le=20)
     summarize: bool = True
     store_for_rag: bool = True
     export_pdf: bool = True

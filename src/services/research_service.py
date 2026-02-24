@@ -30,6 +30,8 @@ class ResearchService:
         self.embedding_max_chars = int(os.getenv("EMBEDDING_MAX_CHARS", "2000"))
         self.keyword_min_hits = int(os.getenv("KEYWORD_MIN_HITS", "1"))
         self.recent_paper_years = int(os.getenv("RECENT_PAPER_YEARS", "2"))
+        self.search_per_subquery_limit = int(os.getenv("SEARCH_PER_SUBQUERY_LIMIT", "30"))
+        self.final_paper_limit = int(os.getenv("FINAL_PAPER_LIMIT", "8"))
         self.two_stage_ranking = os.getenv("TWO_STAGE_RANKING", "true").lower() in {"1", "true", "yes", "on"}
         self.stage1_candidate_factor = int(os.getenv("STAGE1_CANDIDATE_FACTOR", "6"))
         self.stage2_candidate_limit = int(os.getenv("STAGE2_CANDIDATE_LIMIT", "30"))
@@ -40,12 +42,29 @@ class ResearchService:
         self.stage1_recency_weight = float(os.getenv("STAGE1_RECENCY_WEIGHT", "0.6"))
         self.rerank_model = os.getenv("RERANK_MODEL", "bge-reranker-v2-m3")
         self.rerank_doc_max_chars = int(os.getenv("RERANK_DOC_MAX_CHARS", "3000"))
+        self.report_min_words = int(os.getenv("REPORT_MIN_WORDS", "900"))
+        self.report_max_words = int(os.getenv("REPORT_MAX_WORDS", "1400"))
+        self.report_per_paper_chars = int(os.getenv("REPORT_PER_PAPER_CHARS", "2200"))
+        self.report_multi_stage = os.getenv("REPORT_MULTI_STAGE", "true").lower() in {"1", "true", "yes", "on"}
+        self.report_evidence_max_chars = int(os.getenv("REPORT_EVIDENCE_MAX_CHARS", "4500"))
+        self.report_section_target_words = int(os.getenv("REPORT_SECTION_TARGET_WORDS", "150"))
+        self.report_verification_enabled = os.getenv("REPORT_VERIFICATION_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+        self.report_structured_model = os.getenv("REPORT_STRUCTURED_MODEL", "gpt-oss:20b")
+        self.report_writer_model = os.getenv("REPORT_WRITER_MODEL", "gpt-oss:20b")
+        self.report_verifier_model = os.getenv("REPORT_VERIFIER_MODEL", "gpt-oss:20b")
         self.docling_force_cpu = os.getenv("DOCLING_FORCE_CPU", "true").lower() in {"1", "true", "yes", "on"}
         self.docling_page_log = os.getenv("DOCLING_PAGE_LOG", "true").lower() in {"1", "true", "yes", "on"}
         self.docling_max_pages = int(os.getenv("DOCLING_MAX_PAGES", "4"))
+        self.search_per_subquery_limit = max(10, self.search_per_subquery_limit)
+        self.final_paper_limit = max(1, self.final_paper_limit)
         self.stage1_candidate_factor = max(1, self.stage1_candidate_factor)
         self.stage2_candidate_limit = max(1, self.stage2_candidate_limit)
         self.rerank_doc_max_chars = max(200, self.rerank_doc_max_chars)
+        self.report_min_words = max(300, self.report_min_words)
+        self.report_max_words = max(self.report_min_words, self.report_max_words)
+        self.report_per_paper_chars = max(600, self.report_per_paper_chars)
+        self.report_evidence_max_chars = max(1000, self.report_evidence_max_chars)
+        self.report_section_target_words = max(80, self.report_section_target_words)
         total_field_weight = self.stage1_title_weight + self.stage1_abstract_weight
         if total_field_weight <= 0:
             self.stage1_title_weight = 0.65
@@ -103,10 +122,10 @@ class ResearchService:
         for d in [self.papers_dir, self.queries_dir, self.summaries_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
-    def _debug_selected_citations(self, query: str, papers: List[PaperMetadata], max_papers: int):
+    def _debug_selected_citations(self, query: str, papers: List[PaperMetadata], selected_limit: int):
         if not self.debug_citations:
             return
-        selected = papers[:max_papers]
+        selected = papers[:selected_limit]
         total_citations = sum(int(p.citations or 0) for p in selected)
         print(
             f"[CITATION_DEBUG] query={query!r} selected={len(selected)} total_citations={total_citations}"
@@ -120,6 +139,68 @@ class ResearchService:
     def _debug_query(self, message: str):
         if self.debug_query_expansion:
             print(f"[QUERY_DEBUG] {message}")
+
+    def _report_section_specs(self) -> List[Tuple[str, str]]:
+        return [
+            ("Topic Overview", "Define the topic and why it matters for the query."),
+            ("Core Mechanisms", "Explain core technical mechanisms and intuition."),
+            ("Evolution Of The Field", "Summarize how approaches evolved over time."),
+            ("Current State Of The Art", "Describe what is strongest right now based on evidence."),
+            ("Comparative Analysis Of Approaches", "Compare major approaches with concrete tradeoffs."),
+            ("Practical Guidance", "Give actionable guidance for practitioners."),
+            ("Limitations And Open Problems", "Detail unresolved limitations and blockers."),
+            ("Future Directions", "Project credible next research directions."),
+        ]
+
+    def _strip_json_fence(self, text: str) -> str:
+        content = (text or "").strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        elif content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        return content.strip()
+
+    def _safe_parse_json(self, text: str) -> Optional[Dict[str, Any]]:
+        try:
+            parsed = json.loads(self._strip_json_fence(text))
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return None
+        return None
+
+    def _normalize_index_list(self, values: Any, valid_indices: Set[int]) -> List[int]:
+        if not isinstance(values, list):
+            return []
+        normalized: List[int] = []
+        for raw in values:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value in valid_indices and value not in normalized:
+                normalized.append(value)
+        return normalized
+
+    def _citation_indices_in_text(self, text: str) -> Set[int]:
+        return {int(x) for x in re.findall(r"\[(\d+)\]", text or "")}
+
+    def _clean_invalid_citations(self, text: str, valid_indices: Set[int]) -> str:
+        if not text:
+            return ""
+
+        def repl(match: re.Match[str]) -> str:
+            try:
+                idx = int(match.group(1))
+            except (TypeError, ValueError):
+                return ""
+            return f"[{idx}]" if idx in valid_indices else ""
+
+        cleaned = re.sub(r"\[(\d+)\]", repl, text)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        return cleaned.strip()
 
     async def _generate_subqueries(self, query: str) -> List[str]:
         """
@@ -499,9 +580,8 @@ class ResearchService:
         return reranked
     
     async def search_academic_papers(
-        self, 
-        query: str, 
-        max_papers: int = 5
+        self,
+        query: str,
     ) -> List[PaperMetadata]:
         """Search by LLM-generated subqueries, then dedupe and rerank to the original query."""
         subqueries = await self._generate_subqueries(query)
@@ -509,7 +589,8 @@ class ResearchService:
             subqueries = [query]
 
         all_papers: List[PaperMetadata] = []
-        per_query_limit = max(10, max_papers * 3)
+        per_query_limit = self.search_per_subquery_limit
+        final_limit = self.final_paper_limit
 
         for subquery in subqueries:
             tasks = [
@@ -631,8 +712,8 @@ class ResearchService:
             candidate_limit = min(
                 len(ranked),
                 max(
-                    max_papers,
-                    min(self.stage2_candidate_limit, max_papers * self.stage1_candidate_factor),
+                    final_limit,
+                    min(self.stage2_candidate_limit, final_limit * self.stage1_candidate_factor),
                 ),
             )
             candidates = ranked[:candidate_limit]
@@ -650,10 +731,10 @@ class ResearchService:
                 )
 
         self._debug_query(
-            f"raw_total={len(all_papers)} deduped={len(ranked)} selected={min(max_papers, len(ranked))}"
+            f"raw_total={len(all_papers)} deduped={len(ranked)} selected={min(final_limit, len(ranked))}"
         )
-        self._debug_selected_citations(query, ranked, max_papers)
-        return ranked[:max_papers]
+        self._debug_selected_citations(query, ranked, final_limit)
+        return ranked[:final_limit]
     
     async def _search_semantic_scholar(
         self, 
@@ -990,6 +1071,431 @@ Generate a concise summary focused on the research query."""
         except Exception as e:
             print(f"Summarization error for {paper.paper_id}: {e}")
             return paper.abstract or ""
+
+    def _fallback_evidence_card(self, query: str, paper_index: int, paper: PaperContent) -> Dict[str, Any]:
+        metadata = paper.metadata
+        year = self._extract_year(metadata.published_date)
+        abstract = self._normalize_text(metadata.abstract or "")
+        summary = self._normalize_text(paper.summary or "")
+        excerpt = self._normalize_text(paper.full_text or "")[: self.report_evidence_max_chars]
+        combined = "\n".join([x for x in [summary, abstract, excerpt] if x]).strip()
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", combined) if s.strip()]
+        findings = sentences[:3] if sentences else ["Insufficient evidence in selected papers."]
+        return {
+            "paper_index": paper_index,
+            "title": metadata.title,
+            "year": year if year is not None else "Unknown",
+            "source": metadata.source,
+            "citations": metadata.citations if metadata.citations is not None else "Unknown",
+            "problem": findings[0],
+            "method": findings[1] if len(findings) > 1 else "Insufficient evidence in selected papers.",
+            "setting_data": "Insufficient evidence in selected papers.",
+            "key_findings": findings,
+            "strengths": ["Insufficient evidence in selected papers."],
+            "limitations": ["Insufficient evidence in selected papers."],
+            "open_questions": ["Insufficient evidence in selected papers."],
+            "relevance_to_query": f"Potentially relevant to query: {query}",
+            "confidence": "low",
+        }
+
+    async def _extract_evidence_card(self, query: str, paper_index: int, paper: PaperContent) -> Dict[str, Any]:
+        metadata = paper.metadata
+        fallback = self._fallback_evidence_card(query, paper_index, paper)
+        try:
+            import ollama
+            system_prompt = """You extract structured evidence from one academic paper for a state-of-the-art report.
+Return valid JSON only with keys:
+paper_index, problem, method, setting_data, key_findings, strengths, limitations, open_questions, relevance_to_query, confidence.
+Rules:
+1. confidence must be one of: high, medium, low.
+2. key_findings, strengths, limitations, open_questions must be arrays of short strings.
+3. Use only evidence present in the input.
+4. If missing, write 'Insufficient evidence in selected papers.'"""
+            content_excerpt = self._normalize_text(paper.full_text or "")[: self.report_evidence_max_chars]
+            user_prompt = f"""Research query: {query}
+Paper index: {paper_index}
+Title: {metadata.title}
+Authors: {", ".join(metadata.authors) if metadata.authors else "Unknown"}
+Year: {metadata.published_date or "Unknown"}
+Source: {metadata.source}
+Citations: {metadata.citations if metadata.citations is not None else "Unknown"}
+Abstract:
+{metadata.abstract or "Not available"}
+Summary:
+{paper.summary or "Not available"}
+Full text excerpt:
+{content_excerpt or "Not available"}"""
+            response = ollama.chat(
+                model=self.report_structured_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            parsed = self._safe_parse_json(response.get("message", {}).get("content", ""))
+            if not parsed:
+                return fallback
+
+            def to_list(name: str, limit: int = 6) -> List[str]:
+                raw = parsed.get(name, [])
+                if not isinstance(raw, list):
+                    return fallback.get(name, [])[:limit]
+                out: List[str] = []
+                for item in raw:
+                    text = self._normalize_text(item).strip()
+                    if text and text not in out:
+                        out.append(text)
+                    if len(out) >= limit:
+                        break
+                return out or fallback.get(name, [])[:limit]
+
+            confidence = self._normalize_text(parsed.get("confidence", "")).strip().lower()
+            if confidence not in {"high", "medium", "low"}:
+                confidence = "low"
+
+            return {
+                "paper_index": paper_index,
+                "title": metadata.title,
+                "year": self._extract_year(metadata.published_date) or "Unknown",
+                "source": metadata.source,
+                "citations": metadata.citations if metadata.citations is not None else "Unknown",
+                "problem": self._normalize_text(parsed.get("problem", fallback["problem"])).strip() or fallback["problem"],
+                "method": self._normalize_text(parsed.get("method", fallback["method"])).strip() or fallback["method"],
+                "setting_data": self._normalize_text(parsed.get("setting_data", fallback["setting_data"])).strip() or fallback["setting_data"],
+                "key_findings": to_list("key_findings"),
+                "strengths": to_list("strengths"),
+                "limitations": to_list("limitations"),
+                "open_questions": to_list("open_questions"),
+                "relevance_to_query": self._normalize_text(
+                    parsed.get("relevance_to_query", fallback["relevance_to_query"])
+                ).strip() or fallback["relevance_to_query"],
+                "confidence": confidence,
+            }
+        except Exception as e:
+            self._debug_query(f"evidence card extraction failed idx={paper_index}: {type(e).__name__}: {e!r}")
+            return fallback
+
+    async def _build_evidence_cards(self, query: str, papers: List[PaperContent]) -> List[Dict[str, Any]]:
+        cards: List[Dict[str, Any]] = []
+        for i, paper in enumerate(papers, 1):
+            card = await self._extract_evidence_card(query, i, paper)
+            cards.append(card)
+        return cards
+
+    def _render_card_for_prompt(self, card: Dict[str, Any]) -> str:
+        def render_list(values: Any) -> str:
+            if not isinstance(values, list):
+                return "- Insufficient evidence in selected papers."
+            rows = [f"- {self._normalize_text(v).strip()}" for v in values if self._normalize_text(v).strip()]
+            return "\n".join(rows) if rows else "- Insufficient evidence in selected papers."
+
+        return "\n".join(
+            [
+                f"Paper [{card.get('paper_index')}]",
+                f"Title: {card.get('title', 'Unknown')}",
+                f"Year: {card.get('year', 'Unknown')}",
+                f"Source: {card.get('source', 'Unknown')}",
+                f"Citations: {card.get('citations', 'Unknown')}",
+                f"Problem: {card.get('problem', 'Insufficient evidence in selected papers.')}",
+                f"Method: {card.get('method', 'Insufficient evidence in selected papers.')}",
+                f"Setting/Data: {card.get('setting_data', 'Insufficient evidence in selected papers.')}",
+                "Key findings:",
+                render_list(card.get("key_findings")),
+                "Strengths:",
+                render_list(card.get("strengths")),
+                "Limitations:",
+                render_list(card.get("limitations")),
+                "Open questions:",
+                render_list(card.get("open_questions")),
+                f"Relevance to query: {card.get('relevance_to_query', 'Insufficient evidence in selected papers.')}",
+                f"Confidence: {card.get('confidence', 'low')}",
+            ]
+        )
+
+    async def _build_report_outline(self, query: str, cards: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        specs = self._report_section_specs()
+        valid_indices = {int(c.get("paper_index")) for c in cards if isinstance(c.get("paper_index"), int)}
+        if not valid_indices:
+            valid_indices = set(range(1, len(cards) + 1))
+
+        default_outline = [
+            {
+                "title": title,
+                "objective": objective,
+                "paper_indices": sorted(valid_indices),
+            }
+            for title, objective in specs
+        ]
+
+        try:
+            import ollama
+            cards_digest = "\n\n".join(self._render_card_for_prompt(c) for c in cards)
+            section_titles = ", ".join([title for title, _ in specs])
+            system_prompt = """You plan a report outline and map section coverage to evidence cards.
+Return valid JSON only:
+{"sections":[{"title":"...", "objective":"...", "paper_indices":[1,2]}]}
+Rules:
+1. Only use section titles exactly as provided by the user prompt.
+2. paper_indices must reference existing card indices only.
+3. Every section must include at least one paper index."""
+            user_prompt = f"""Research query: {query}
+Allowed section titles: {section_titles}
+Evidence cards:
+{cards_digest}
+Return outline JSON only."""
+            response = ollama.chat(
+                model=self.report_structured_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            parsed = self._safe_parse_json(response.get("message", {}).get("content", ""))
+            if not parsed:
+                return default_outline
+            rows = parsed.get("sections", [])
+            if not isinstance(rows, list):
+                return default_outline
+
+            normalized: List[Dict[str, Any]] = []
+            by_title = {
+                self._normalize_text(item.get("title", "")).strip().lower(): item
+                for item in rows
+                if isinstance(item, dict)
+            }
+            for title, objective in specs:
+                src = by_title.get(title.lower(), {})
+                mapped = self._normalize_index_list(src.get("paper_indices"), valid_indices)
+                if not mapped:
+                    mapped = sorted(valid_indices)
+                normalized.append(
+                    {
+                        "title": title,
+                        "objective": self._normalize_text(src.get("objective", objective)).strip() or objective,
+                        "paper_indices": mapped,
+                    }
+                )
+            return normalized
+        except Exception as e:
+            self._debug_query(f"outline planning failed: {type(e).__name__}: {e!r}")
+            return default_outline
+
+    async def _write_report_section(
+        self,
+        query: str,
+        title: str,
+        objective: str,
+        paper_indices: List[int],
+        cards_by_index: Dict[int, Dict[str, Any]],
+        revision_reason: str = "",
+    ) -> str:
+        valid_indices = [i for i in paper_indices if i in cards_by_index]
+        cards_text = "\n\n---\n\n".join(self._render_card_for_prompt(cards_by_index[i]) for i in valid_indices)
+        if not cards_text:
+            return "Insufficient evidence in selected papers."
+        try:
+            import ollama
+            system_prompt = f"""You write one section of a technical state-of-the-art report.
+Output plain markdown paragraphs only; do not output a heading.
+Target length: about {self.report_section_target_words} words.
+Rules:
+1. Use only provided evidence cards.
+2. Cite factual claims with bracket citations like [1], [2].
+3. Only allowed citation indices are: {valid_indices}.
+4. If evidence is weak, explicitly state 'Insufficient evidence in selected papers.'"""
+            user_prompt = f"""Research query: {query}
+Section title: {title}
+Section objective: {objective}
+{f"Revision request: {revision_reason}" if revision_reason else ""}
+Evidence cards:
+{cards_text}
+Write the section body only."""
+            response = ollama.chat(
+                model=self.report_writer_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            text = self._normalize_text(response.get("message", {}).get("content", "")).strip()
+            text = self._clean_invalid_citations(text, set(valid_indices))
+            if not text:
+                text = "Insufficient evidence in selected papers."
+            if valid_indices and not self._citation_indices_in_text(text):
+                text = f"{text}\n\nInsufficient evidence in selected papers."
+            return text
+        except Exception as e:
+            self._debug_query(f"section generation failed title={title!r}: {type(e).__name__}: {e!r}")
+            return "Insufficient evidence in selected papers."
+
+    async def _verify_and_repair_sections(
+        self,
+        query: str,
+        sections: List[Dict[str, Any]],
+        cards_by_index: Dict[int, Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not self.report_verification_enabled:
+            return sections
+
+        for section in sections:
+            allowed = set(section.get("paper_indices", []))
+            section["text"] = self._clean_invalid_citations(section.get("text", ""), allowed)
+
+        try:
+            import ollama
+            checks_input = []
+            for section in sections:
+                checks_input.append(
+                    {
+                        "title": section.get("title"),
+                        "allowed_indices": section.get("paper_indices", []),
+                        "text": section.get("text", ""),
+                    }
+                )
+            system_prompt = """You verify section quality for a technical report.
+Return valid JSON only:
+{"section_checks":[{"title":"...", "status":"ok|revise", "reason":"..."}]}
+Mark revise when citations are missing/invalid or claims appear unsupported by provided section text."""
+            user_prompt = (
+                f"Research query: {query}\n"
+                f"Sections JSON:\n{json.dumps(checks_input, ensure_ascii=False)}\n"
+                "Return verification JSON only."
+            )
+            response = ollama.chat(
+                model=self.report_verifier_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            parsed = self._safe_parse_json(response.get("message", {}).get("content", ""))
+            checks = parsed.get("section_checks", []) if parsed else []
+            revise_by_title: Dict[str, str] = {}
+            if isinstance(checks, list):
+                for row in checks:
+                    if not isinstance(row, dict):
+                        continue
+                    title = self._normalize_text(row.get("title", "")).strip()
+                    if not title:
+                        continue
+                    status = self._normalize_text(row.get("status", "")).strip().lower()
+                    reason = self._normalize_text(row.get("reason", "")).strip() or "Missing support or citation issues."
+                    if status == "revise":
+                        revise_by_title[title] = reason
+
+            fixed: List[Dict[str, Any]] = []
+            for section in sections:
+                title = section.get("title", "")
+                allowed = section.get("paper_indices", [])
+                text = section.get("text", "")
+                needs_revision = False
+                reason = revise_by_title.get(title, "")
+                if allowed and not self._citation_indices_in_text(text):
+                    needs_revision = True
+                    if not reason:
+                        reason = "Add concrete supported claims with valid citations."
+                if reason:
+                    needs_revision = True
+
+                if needs_revision:
+                    rewritten = await self._write_report_section(
+                        query=query,
+                        title=title,
+                        objective=section.get("objective", ""),
+                        paper_indices=allowed,
+                        cards_by_index=cards_by_index,
+                        revision_reason=reason,
+                    )
+                    section["text"] = self._clean_invalid_citations(rewritten, set(allowed))
+                fixed.append(section)
+            return fixed
+        except Exception as e:
+            self._debug_query(f"report verification failed: {type(e).__name__}: {e!r}")
+            return sections
+
+    async def _generate_bottom_line(
+        self,
+        query: str,
+        cards: List[Dict[str, Any]],
+    ) -> str:
+        valid_indices = {
+            int(c.get("paper_index"))
+            for c in cards
+            if isinstance(c.get("paper_index"), int)
+        }
+        cards_text = "\n\n---\n\n".join(self._render_card_for_prompt(c) for c in cards)
+        try:
+            import ollama
+            system_prompt = """Write a short bottom-line synthesis for a state-of-the-art report.
+Rules:
+1. 80-140 words.
+2. State where the field stands right now.
+3. Include confidence labels (high/medium/low) for major claims.
+4. Use citations like [1], [2] only from allowed indices."""
+            user_prompt = f"""Research query: {query}
+Allowed citation indices: {sorted(valid_indices)}
+Evidence cards:
+{cards_text}
+Write only the bottom-line paragraph."""
+            response = ollama.chat(
+                model=self.report_writer_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            text = self._normalize_text(response.get("message", {}).get("content", "")).strip()
+            text = self._clean_invalid_citations(text, valid_indices)
+            return text or "Insufficient evidence in selected papers."
+        except Exception as e:
+            self._debug_query(f"bottom-line generation failed: {type(e).__name__}: {e!r}")
+            return "Insufficient evidence in selected papers."
+
+    async def _generate_state_of_art_report(self, query: str, papers: List[PaperContent]) -> str:
+        cards = await self._build_evidence_cards(query, papers)
+        if not cards:
+            return ""
+
+        cards_by_index = {
+            int(card["paper_index"]): card
+            for card in cards
+            if isinstance(card.get("paper_index"), int)
+        }
+        outline = await self._build_report_outline(query, cards)
+        sections: List[Dict[str, Any]] = []
+        for row in outline:
+            title = row.get("title", "").strip()
+            objective = row.get("objective", "").strip()
+            paper_indices = row.get("paper_indices", [])
+            text = await self._write_report_section(
+                query=query,
+                title=title,
+                objective=objective,
+                paper_indices=paper_indices,
+                cards_by_index=cards_by_index,
+            )
+            sections.append(
+                {
+                    "title": title,
+                    "objective": objective,
+                    "paper_indices": paper_indices,
+                    "text": text,
+                }
+            )
+
+        sections = await self._verify_and_repair_sections(query, sections, cards_by_index)
+        bottom_line = await self._generate_bottom_line(query, cards)
+
+        parts: List[str] = []
+        for section in sections:
+            title = section.get("title", "").strip()
+            if not title:
+                continue
+            body = section.get("text", "").strip() or "Insufficient evidence in selected papers."
+            parts.append(f"**{title}**\n{body}")
+        parts.append(f"**Bottom Line**\n{bottom_line}")
+        report = "\n\n".join(parts).strip()
+        return self._postprocess_summary_text(report, paper_count=len(papers))
     
     async def run_research_pipeline(
         self,
@@ -1010,7 +1516,7 @@ Generate a concise summary focused on the research query."""
         }
         
         try:
-            papers = await self.search_academic_papers(query, options.max_papers)
+            papers = await self.search_academic_papers(query)
             if not papers:
                 result["status"] = ResearchStatus.COMPLETED
                 result["summary"] = (
@@ -1047,9 +1553,14 @@ Generate a concise summary focused on the research query."""
                 await self._save_query_state(query_id, result)
             
             if options.summarize and paper_contents:
-                result["summary"] = await self._generate_combined_summary(
-                    query, paper_contents
-                )
+                if self.report_multi_stage:
+                    result["summary"] = await self._generate_state_of_art_report(
+                        query, paper_contents
+                    )
+                if not result.get("summary"):
+                    result["summary"] = await self._generate_combined_summary(
+                        query, paper_contents
+                    )
             
             if options.export_pdf:
                 from .export_service import ExportService
@@ -1088,29 +1599,57 @@ Generate a concise summary focused on the research query."""
             
             paper_summaries = []
             for i, p in enumerate(papers, 1):
-                summary_text = p.summary or p.metadata.abstract or "No summary available"
-                paper_summaries.append(f"Paper {i}: {p.metadata.title}\n{summary_text}")
+                metadata = p.metadata
+                abstract_text = (metadata.abstract or "").strip() or "Not available"
+                excerpt_source = (p.full_text or p.summary or metadata.abstract or "").strip()
+                excerpt = excerpt_source[: self.report_per_paper_chars] if excerpt_source else "Not available"
+                year = self._extract_year(metadata.published_date)
+                paper_summaries.append(
+                    "\n".join(
+                        [
+                            f"Paper [{i}]",
+                            f"Title: {metadata.title}",
+                            f"Year: {year if year is not None else 'Unknown'}",
+                            f"Source: {metadata.source}",
+                            f"Citations: {metadata.citations if metadata.citations is not None else 'Unknown'}",
+                            f"Abstract: {abstract_text}",
+                            "Evidence excerpt:",
+                            excerpt,
+                        ]
+                    )
+                )
             
             combined_text = "\n\n---\n\n".join(paper_summaries)
             
-            system_prompt = """You are an academic research assistant.
-Create a concise consolidated review.
+            system_prompt = f"""You are an academic research assistant writing a detailed state-of-the-art report.
+Audience: technically literate readers who want both foundations and current frontier status.
+Write between {self.report_min_words} and {self.report_max_words} words.
+Required output structure (exact section titles, each on its own line in bold markdown):
+**Topic Overview**
+**Core Mechanisms**
+**Evolution Of The Field**
+**Current State Of The Art**
+**Comparative Analysis Of Approaches**
+**Practical Guidance**
+**Limitations And Open Problems**
+**Future Directions**
 Output rules:
-1. Use 4-6 sections with titles in bold markdown on their own lines, for example **Introduction**.
-2. Keep each section to 2-4 short sentences.
-3. Add bracket citations like [1], [2] for factual claims.
-4. Use only citation indices that correspond to provided papers.
-5. No equations, no tables, no checkmarks, no emoji.
-6. Use '-' instead of em dash.
-7. Keep total length under 320 words."""
+1. Explain the concept itself before discussing recent papers.
+2. Base all factual claims only on provided paper evidence.
+3. Add bracket citations like [1], [2] tied to provided paper indices.
+4. Use only citation indices that exist in the provided list.
+5. For each section, include concrete evidence-backed claims and tradeoffs.
+6. If evidence is insufficient for a claim, explicitly say "Insufficient evidence in selected papers."
+7. No equations, no tables, no emoji, and use '-' instead of em dash.
+8. End with a short paragraph titled **Bottom Line** that states where the field stands right now."""
             
             user_prompt = f"""Research query: {query}
 
-Papers summary:
+Paper evidence:
 
 {combined_text}
 
-Generate a consolidated literature review addressing the research query."""
+Generate a detailed state-of-the-art report addressing the research query."""
             
             response = ollama.chat(
                 model="gpt-oss:20b",
