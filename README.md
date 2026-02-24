@@ -55,7 +55,7 @@ flowchart TD
  R --> V
  T --> V
  U --> V
- V --> W[GET /research/{query_id}]
+ V --> W["GET /research/{query_id}"]
 ```
 
 ## API Endpoints
