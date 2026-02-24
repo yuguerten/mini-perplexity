@@ -95,8 +95,19 @@ class ExportService:
             0x200A: " ",  # hair space
             0x2060: "",   # word joiner
             0xFEFF: "",   # zero-width no-break space
+            0x2010: "-",  # hyphen
+            0x2011: "-",  # non-breaking hyphen
+            0x2012: "-",  # figure dash
             0x2013: "-",  # en dash
             0x2014: "-",  # em dash
+            0x2212: "-",  # minus sign
+            0x2264: "<=",  # less-than or equal to
+            0x2265: ">=",  # greater-than or equal to
+            0x2260: "!=",  # not equal to
+            0x2248: "~=",  # almost equal to
+            0x00B1: "+/-",  # plus-minus
+            0x00D7: "x",  # multiplication sign
+            0x00F7: "/",  # division sign
             0x2713: "yes",   # check mark
             0x2714: "yes",   # heavy check mark
             0x2717: "no",    # ballot x
