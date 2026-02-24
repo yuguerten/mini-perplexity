@@ -1,99 +1,82 @@
 # Mini-Perplexity
 
-Academic research assistant with two working paths:
+FastAPI-based academic research assistant for paper discovery, ranking, evidence-grounded report generation, PDF export, and optional RAG storage.
 
-- API pipeline for academic papers (`FastAPI`): search papers, download PDFs, extract with Docling, summarize, export PDF, optional RAG ingest.
-- CLI web-research pipeline: SearXNG search + crawl4ai extraction + markdown report.
+## Scope
+This README documents the FastAPI pipeline only.
 
-## Current Status (February 20, 2026)
+## Current API Pipeline
 
-Implemented now:
+1. Receive query via `POST /research`.
+2. Expand query into close subqueries.
+3. Search Semantic Scholar, arXiv, and PubMed.
+4. Deduplicate, apply recency/topical filtering, and rank with a two-stage ranker:
+   - Stage 1: embedding-based scoring (field-aware and multi-query).
+   - Stage 2: optional reranking on top candidates.
+5. For selected papers: download PDF (if available), extract with Docling, and optionally summarize per paper.
+6. Build report with a multi-pass internal flow:
+   - evidence-card extraction
+   - outline planning
+   - section-by-section writing
+   - verification and targeted repair
+   - bottom-line synthesis
+7. Export final report to PDF (`pdflatex` via PyLaTeX).
+8. Optionally ingest full text into Chroma for `/rag/query`.
 
-- FastAPI endpoints:
-  - `POST /research`
-  - `GET /research/{id}`
-  - `POST /rag/query`
-  - `GET /history`
-  - `GET /export/{query_id}`
-- Academic source search in API path:
-  - Semantic Scholar
-  - arXiv
-  - PubMed
-- Paper processing:
-  - PDF download (when available)
-  - Docling extraction (fallback to abstract)
-  - Per-paper summary + combined summary
-- Export:
-  - PDF generation via WeasyPrint
-- RAG:
-  - ChromaDB collection for chunked paper content
-  - Retrieval and answer generation endpoint
-- Model defaults switched to:
-  - `gpt-oss:20b`
+Detailed pipeline reference: [docs/non_cli_pipeline.md](docs/non_cli_pipeline.md)
 
 ## Architecture
 
-### API Academic Pipeline (FastAPI)
-
 ```mermaid
 flowchart TD
- A[User Query] -->|POST /research| B(Start Research Pipeline)
- B --> C{Search Academic Sources}
- C -->|Semantic Scholar| D[Paper Metadata]
- C -->|arXiv| D
- C -->|PubMed| D
- D --> E[Download PDF if available]
- E --> F{Extract Content}
- F -->|Docling success| G[Full Text]
- F -->|No PDF / fail| H[Use Abstract]
- G --> I[Summarize Paper]
- H --> I
- I --> J[Build Combined Summary]
- J --> K{Export PDF?}
- K -->|Yes| L[Generate Report PDF]
- K -->|No| M[Skip Export]
- J --> N{Store for RAG?}
- N -->|Yes| O[Chunk + Embed + Store in Chroma]
- N -->|No| P[Skip RAG Storage]
- L --> Q[Save Query State]
- M --> Q
- O --> Q
- P --> Q
- Q --> R["GET /research/{id} returns result"]
+ A[User Query] -->|POST /research| B(Start Background Job)
+ B --> C[Generate Subqueries]
+ C --> D[Search Semantic Scholar]
+ C --> E[Search arXiv]
+ C --> F[Search PubMed]
+ D --> G[Merge + Deduplicate]
+ E --> G
+ F --> G
+ G --> H[Recency + Topical Filter]
+ H --> I[Stage-1 Embedding Rank]
+ I --> J[Stage-2 Rerank]
+ J --> K[Select Final Papers]
+ K --> L[Download PDFs]
+ L --> M[Docling Extraction]
+ M --> N[Per-paper Summary Optional]
+ N --> O[Multi-pass SOTA Report]
+ O --> P{Export PDF?}
+ P -->|Yes| Q[PyLaTeX + pdflatex]
+ P -->|No| R[Skip PDF]
+ O --> S{Store for RAG?}
+ S -->|Yes| T[Chunk + Embed + Chroma]
+ S -->|No| U[Skip RAG]
+ Q --> V[Persist Query State]
+ R --> V
+ T --> V
+ U --> V
+ V --> W[GET /research/{query_id}]
 ```
-
-### CLI Web Pipeline
-
-```mermaid
-flowchart TD
- A[CLI Question] --> B[SearXNG Search]
- B --> C[crawl4ai Crawl/Extract]
- C --> D[LLM Summaries]
- D --> E[Markdown Report]
-```
-
-Important:
-
-- `crawl4ai` is used in the CLI web pipeline.
-- `Docling` is used in the API academic-paper pipeline.
 
 ## API Endpoints
 
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/research` | Start async academic research job |
-| GET | `/research/{id}` | Poll job status and result |
-| POST | `/rag/query` | Ask question over stored paper chunks |
-| GET | `/history` | List saved research runs |
-| GET | `/export/{query_id}` | Download exported PDF |
+| POST | `/research` | Start async research pipeline |
+| GET | `/research/{query_id}` | Get job status and result |
+| GET | `/history` | List past research jobs |
+| GET | `/export/{query_id}` | Download generated PDF |
+| POST | `/rag/query` | Query stored paper chunks |
+| GET | `/rag/stats` | RAG collection stats |
+| DELETE | `/rag/paper/{paper_id}` | Delete one paper from RAG |
+| DELETE | `/rag/clear` | Clear all RAG documents |
 
-### `POST /research` request body
+## `POST /research` Request
 
 ```json
 {
-  "query": "recent findings in knowledge distillation for large language models 2024 2025",
+  "query": "what changed in attention mechanism from attention is all you need to now",
   "options": {
-    "max_papers": 5,
     "summarize": true,
     "store_for_rag": true,
     "export_pdf": true
@@ -101,15 +84,36 @@ Important:
 }
 ```
 
+## Key Runtime Controls (Environment Variables)
+
+### Retrieval and Ranking
+- `SEARCH_PER_SUBQUERY_LIMIT` (default `30`)
+- `FINAL_PAPER_LIMIT` (default `8`)
+- `RECENT_PAPER_YEARS` (default `2`)
+- `EMBEDDING_MODEL` (default `embeddinggemma`)
+- `TWO_STAGE_RANKING` (default `true`)
+- `RERANK_MODEL` (default `bge-reranker-v2-m3`)
+
+### Report Generation
+- `REPORT_MULTI_STAGE` (default `true`)
+- `REPORT_MIN_WORDS` (default `900`)
+- `REPORT_MAX_WORDS` (default `1400`)
+- `REPORT_SECTION_TARGET_WORDS` (default `150`)
+- `REPORT_VERIFICATION_ENABLED` (default `true`)
+- `REPORT_STRUCTURED_MODEL` (default `gpt-oss:20b`)
+- `REPORT_WRITER_MODEL` (default `gpt-oss:20b`)
+- `REPORT_VERIFIER_MODEL` (default `gpt-oss:20b`)
+
+### Extraction and Export
+- `DOCLING_MAX_PAGES` (default `4`)
+- `REPORT_INCLUDE_ARTIFACTS` (default `false`)
+
 ## Local Run
 
 ### Requirements
-
-- Python 3.12+
-- Ollama installed and running
-- Optional for CLI web path:
-  - SearXNG
-  - crawl4ai
+- Python `3.12+`
+- Ollama running locally
+- TeX installation with `pdflatex` available in `PATH`
 
 ### Install
 
@@ -120,10 +124,11 @@ python -m venv .venv
 pip install -e .
 ```
 
-### Pull model
+### Pull required models (example)
 
 ```bash
 ollama pull gpt-oss:20b
+ollama pull embeddinggemma
 ```
 
 ### Run API
@@ -132,53 +137,23 @@ ollama pull gpt-oss:20b
 .venv/bin/python -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-### Run CLI
-
-```bash
-.venv/bin/python src/cli.py
-```
-
-## Real API Test
-
-Submit:
+## Quick API Test
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/research" \
   -H "Content-Type: application/json" \
-  --data-raw '{"query":"what changed in attention mechanism from attention is all you need to now","options":{"max_papers":6,"summarize":true,"store_for_rag":true,"export_pdf":true}}'
+  --data-raw '{"query":"what changed in attention mechanism from attention is all you need to now","options":{"summarize":true,"store_for_rag":true,"export_pdf":true}}'
 ```
 
-Poll:
+Then poll:
 
 ```bash
 curl "http://127.0.0.1:8000/research/<QUERY_ID>"
 ```
 
-## Debugging PDF Download Failures
-
-Enable PDF URL/download debug logs:
-
-```bash
-DEBUG_PDF_DOWNLOAD=true .venv/bin/python -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000 --reload
-```
-
-This logs:
-
-- missing `pdf_url`
-- attempted `pdf_url`
-- HTTP status failures
-- unexpected content type
-- exception details
-
-## Current Gaps
-
-- API path is not yet restricted to Google Scholar-only discovery.
-- No idempotency key on `POST /research` (retries create new `query_id`).
-- Test suite is still minimal; most validation is smoke/manual.
-
 ## Storage Layout
 
-- `data/queries/`: job state JSON
+- `data/queries/`: research job state JSON
 - `data/papers/`: downloaded PDFs
-- `data/exports/`: generated reports
-- `data/chroma/`: vector DB persistence
+- `data/exports/`: generated report PDFs
+- `data/chroma/`: Chroma persistence for RAG
