@@ -30,9 +30,30 @@ class ResearchService:
         self.embedding_max_chars = int(os.getenv("EMBEDDING_MAX_CHARS", "2000"))
         self.keyword_min_hits = int(os.getenv("KEYWORD_MIN_HITS", "1"))
         self.recent_paper_years = int(os.getenv("RECENT_PAPER_YEARS", "2"))
+        self.two_stage_ranking = os.getenv("TWO_STAGE_RANKING", "true").lower() in {"1", "true", "yes", "on"}
+        self.stage1_candidate_factor = int(os.getenv("STAGE1_CANDIDATE_FACTOR", "6"))
+        self.stage2_candidate_limit = int(os.getenv("STAGE2_CANDIDATE_LIMIT", "30"))
+        self.stage1_title_weight = float(os.getenv("STAGE1_TITLE_WEIGHT", "0.65"))
+        self.stage1_abstract_weight = float(os.getenv("STAGE1_ABSTRACT_WEIGHT", "0.35"))
+        self.stage1_best_query_weight = float(os.getenv("STAGE1_BEST_QUERY_WEIGHT", "0.75"))
+        self.stage1_lexical_weight = float(os.getenv("STAGE1_LEXICAL_WEIGHT", "0.6"))
+        self.stage1_recency_weight = float(os.getenv("STAGE1_RECENCY_WEIGHT", "0.6"))
+        self.rerank_model = os.getenv("RERANK_MODEL", "bge-reranker-v2-m3")
+        self.rerank_doc_max_chars = int(os.getenv("RERANK_DOC_MAX_CHARS", "3000"))
         self.docling_force_cpu = os.getenv("DOCLING_FORCE_CPU", "true").lower() in {"1", "true", "yes", "on"}
         self.docling_page_log = os.getenv("DOCLING_PAGE_LOG", "true").lower() in {"1", "true", "yes", "on"}
         self.docling_max_pages = int(os.getenv("DOCLING_MAX_PAGES", "4"))
+        self.stage1_candidate_factor = max(1, self.stage1_candidate_factor)
+        self.stage2_candidate_limit = max(1, self.stage2_candidate_limit)
+        self.rerank_doc_max_chars = max(200, self.rerank_doc_max_chars)
+        total_field_weight = self.stage1_title_weight + self.stage1_abstract_weight
+        if total_field_weight <= 0:
+            self.stage1_title_weight = 0.65
+            self.stage1_abstract_weight = 0.35
+        else:
+            self.stage1_title_weight /= total_field_weight
+            self.stage1_abstract_weight /= total_field_weight
+        self.stage1_best_query_weight = min(max(self.stage1_best_query_weight, 0.0), 1.0)
 
     def _normalize_text(self, value: Any) -> str:
         if value is None:
@@ -176,6 +197,30 @@ class ResearchService:
         if abstract:
             return f"{title}\n{abstract}"
         return title
+
+    def _paper_title_text(self, paper: PaperMetadata) -> str:
+        return (paper.title or "").strip()
+
+    def _paper_abstract_text(self, paper: PaperMetadata) -> str:
+        return (paper.abstract or "").strip()
+
+    def _paper_rerank_text(self, paper: PaperMetadata) -> str:
+        title = self._paper_title_text(paper)
+        abstract = self._paper_abstract_text(paper)
+        if abstract:
+            return f"Title: {title}\nAbstract: {abstract}"
+        return f"Title: {title}"
+
+    def _query_variants_for_ranking(self, query: str, subqueries: List[str]) -> List[str]:
+        variants: List[str] = []
+        for item in [query] + (subqueries or []):
+            q = (item or "").strip()
+            if not q:
+                continue
+            if q.lower() in {v.lower() for v in variants}:
+                continue
+            variants.append(q)
+        return variants
 
     def _extract_year(self, published_date: Optional[str]) -> Optional[int]:
         if not published_date:
@@ -349,19 +394,109 @@ class ResearchService:
     def _score_paper(
         self,
         paper: PaperMetadata,
-        query_embedding: List[float],
-        paper_embedding: List[float],
+        query_embeddings: List[List[float]],
+        title_embedding: List[float],
+        abstract_embedding: List[float],
+        has_abstract: bool,
         term_hits: int,
         anchor_hits: int,
         year: int,
         cutoff_year: int,
-    ) -> float:
-        sim = self._cosine_sim(query_embedding, paper_embedding)
+    ) -> Tuple[float, float]:
+        per_query_semantic: List[float] = []
+        for query_emb in query_embeddings:
+            title_sim = self._cosine_sim(query_emb, title_embedding)
+            if has_abstract:
+                abstract_sim = self._cosine_sim(query_emb, abstract_embedding)
+                semantic = (self.stage1_title_weight * title_sim) + (self.stage1_abstract_weight * abstract_sim)
+            else:
+                semantic = title_sim
+            per_query_semantic.append(semantic)
+
+        best_semantic = max(per_query_semantic) if per_query_semantic else 0.0
+        mean_semantic = (sum(per_query_semantic) / len(per_query_semantic)) if per_query_semantic else 0.0
+        combined_semantic = (
+            (self.stage1_best_query_weight * best_semantic)
+            + ((1.0 - self.stage1_best_query_weight) * mean_semantic)
+        )
+
         citation_score = math.log1p(float(paper.citations or 0)) * 0.45
         pdf_bonus = 0.3 if paper.pdf_url else 0.0
-        lexical_bonus = (term_hits * 1.8) + (anchor_hits * 3.0)
-        recency_bonus = max(0, year - cutoff_year) * 0.05
-        return (sim * 10.0) + citation_score + pdf_bonus + lexical_bonus + recency_bonus
+        lexical_bonus = ((term_hits * 1.8) + (anchor_hits * 3.0)) * self.stage1_lexical_weight
+        recency_bonus = (max(0, year - cutoff_year) * 0.05) * self.stage1_recency_weight
+        final_score = (combined_semantic * 10.0) + citation_score + pdf_bonus + lexical_bonus + recency_bonus
+        return final_score, best_semantic
+
+    def _parse_rerank_scores(self, response: Any) -> Dict[int, float]:
+        if not isinstance(response, dict):
+            return {}
+        rows = response.get("results")
+        if not isinstance(rows, list):
+            return {}
+        parsed: Dict[int, float] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            index = row.get("index")
+            if not isinstance(index, int):
+                continue
+            score_raw = row.get("relevance_score", row.get("score"))
+            try:
+                score = float(score_raw)
+            except (TypeError, ValueError):
+                continue
+            parsed[index] = score
+        return parsed
+
+    def _rerank_candidates(
+        self,
+        query: str,
+        candidates: List[PaperMetadata],
+        stage1_scores: Dict[str, float],
+    ) -> List[PaperMetadata]:
+        if len(candidates) <= 1:
+            return candidates
+
+        try:
+            import ollama
+        except Exception as e:
+            self._debug_query(f"rerank unavailable (ollama import failed): {type(e).__name__}: {e!r}")
+            return []
+
+        rerank_fn = getattr(ollama, "rerank", None)
+        if not callable(rerank_fn):
+            self._debug_query("rerank unavailable (ollama.rerank not present); using stage1 only")
+            return []
+
+        docs = [self._paper_rerank_text(p)[: self.rerank_doc_max_chars] for p in candidates]
+        try:
+            response = rerank_fn(
+                model=self.rerank_model,
+                query=query,
+                documents=docs,
+                top_n=len(docs),
+            )
+        except Exception as e:
+            self._debug_query(f"rerank call failed: {type(e).__name__}: {e!r}")
+            return []
+
+        rerank_scores = self._parse_rerank_scores(response)
+        if not rerank_scores:
+            self._debug_query("rerank returned no usable scores; using stage1 only")
+            return []
+
+        indexed = list(enumerate(candidates))
+        ordered = sorted(
+            indexed,
+            key=lambda item: (
+                1 if item[0] in rerank_scores else 0,
+                rerank_scores.get(item[0], float("-inf")),
+                stage1_scores.get(item[1].paper_id, float("-inf")),
+            ),
+            reverse=True,
+        )
+        reranked = [paper for _, paper in ordered]
+        return reranked
     
     async def search_academic_papers(
         self, 
@@ -456,26 +591,63 @@ class ResearchService:
         else:
             self._debug_query("topical_filter skipped (no usable query terms)")
 
-        query_embedding = self._get_embeddings([query])[0]
-        paper_texts = [self._paper_text(p) for p in papers]
-        paper_embeddings = self._get_embeddings(paper_texts)
+        query_variants = self._query_variants_for_ranking(query, subqueries)
+        query_embeddings = self._get_embeddings(query_variants)
+        title_texts = [self._paper_title_text(p) for p in papers]
+        abstract_texts = [self._paper_abstract_text(p) for p in papers]
+        title_embeddings = self._get_embeddings(title_texts)
+        abstract_inputs = [a if a else title_texts[i] for i, a in enumerate(abstract_texts)]
+        abstract_embeddings = self._get_embeddings(abstract_inputs)
 
         scored = []
-        for paper, emb in zip(papers, paper_embeddings):
+        stage1_scores: Dict[str, float] = {}
+        for paper, title_emb, abstract_emb, abstract_text in zip(
+            papers, title_embeddings, abstract_embeddings, abstract_texts
+        ):
             year = self._extract_year(paper.published_date) or 0
             hits, anchor_hits = term_stats.get(paper.paper_id, self._paper_term_hits(paper, query_terms, anchor_terms))
-            score = self._score_paper(
-                paper, query_embedding, emb, hits, anchor_hits, year, cutoff_year
+            score, best_sem = self._score_paper(
+                paper,
+                query_embeddings,
+                title_emb,
+                abstract_emb,
+                bool(abstract_text),
+                hits,
+                anchor_hits,
+                year,
+                cutoff_year,
             )
             self._debug_query(
-                f"score={score:.4f} year={year} hits={hits} anchors={anchor_hits} source={paper.source} "
+                f"stage1_score={score:.4f} best_sem={best_sem:.4f} year={year} hits={hits} anchors={anchor_hits} source={paper.source} "
                 f"paper_id={paper.paper_id} title={paper.title!r}"
             )
             scored.append((paper, score, year))
+            stage1_scores[paper.paper_id] = score
 
         ordered = sorted(scored, key=lambda x: (x[1], x[2]), reverse=True)
-
         ranked = [p for p, _, _ in ordered]
+
+        if self.two_stage_ranking and ranked:
+            candidate_limit = min(
+                len(ranked),
+                max(
+                    max_papers,
+                    min(self.stage2_candidate_limit, max_papers * self.stage1_candidate_factor),
+                ),
+            )
+            candidates = ranked[:candidate_limit]
+            reranked_candidates = self._rerank_candidates(query, candidates, stage1_scores)
+            if reranked_candidates:
+                reranked_ids = {p.paper_id for p in reranked_candidates}
+                tail = [p for p in ranked if p.paper_id not in reranked_ids]
+                ranked = reranked_candidates + tail
+                self._debug_query(
+                    f"stage2_rerank model={self.rerank_model!r} candidates={len(candidates)} applied=true"
+                )
+            else:
+                self._debug_query(
+                    f"stage2_rerank model={self.rerank_model!r} candidates={len(candidates)} applied=false"
+                )
 
         self._debug_query(
             f"raw_total={len(all_papers)} deduped={len(ranked)} selected={min(max_papers, len(ranked))}"
