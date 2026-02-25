@@ -1,4 +1,5 @@
 import os
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -80,14 +81,25 @@ async def create_research(
         run_research,
         query_id,
         request.query,
-        options
+        options,
+        time.time(),
     )
     
     return initial_response
 
 
-async def run_research(query_id: str, query: str, options: ResearchOptions):
-    await research_service.run_research_pipeline(query, options, query_id)
+async def run_research(query_id: str, query: str, options: ResearchOptions, started_at_epoch: float):
+    result = await research_service.run_research_pipeline(query, options, query_id)
+
+    if options.export_pdf:
+        elapsed_seconds = max(time.time() - started_at_epoch, 0.0)
+        total_seconds = int(round(elapsed_seconds))
+        minutes = total_seconds // 60
+        seconds = total_seconds % 60
+        if result.get("pdf_path"):
+            print(f"[time] research spend : {minutes}min {seconds}s")
+        else:
+            print(f"[time] research spend : {minutes}min {seconds}s (pdf not generated)")
     
     if options.store_for_rag:
         state = await research_service.get_query_state(query_id)
