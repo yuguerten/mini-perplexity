@@ -2,6 +2,10 @@
 
 A CLI research assistant powered by local LLMs (via Ollama) and web search (via SearXNG).
 
+## Demo
+
+[Watch the Demo](https://drive.google.com/file/d/1mXYzWtikS7_EuZvhfyGm-rGrgOipruwF/view?usp=sharing)
+
 ![Architecture](assets/arch.png)
 
 ## Features
